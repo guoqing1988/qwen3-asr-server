@@ -408,8 +408,25 @@ asyncio.run(main())
 `format`、`sample_rate`、`enable_intermediate_result`、`enable_punctuation`、
 `enable_itn` 等参数。
 
-流式限制：两条路径都不返回词级时间戳；FunASR 路径最多保留约 10 秒待处理
-音频，队列满时对发送端施加背压而非丢弃音频。
+**实时行为**（Qwen3 路径）：真正的实时识别。每个音频 chunk（默认 2 秒）
+增量解码后立即推送 `type: "result"`（`is_partial: true`），客户端可渲染
+实时字幕；一句话结束（静音 3 秒或单段上限）时推送 `segment_end` 确认文本。
+延迟调优：
+
+| 参数 | 默认 | 作用 |
+|------|------|------|
+| `chunk_size_sec` | 2.0 | 出字延迟；调小（如 1.0）更实时 |
+| `unfixed_token_num` | 5 | 句尾回滚修正 token 数 |
+| `unfixed_chunk_num` | 2 | 允许截断前的预热 chunk 数 |
+
+**流式限制**：
+- 两条路径都不返回词级时间戳
+- FunASR 路径最多保留约 10 秒待处理音频，队列满时对发送端施加背压而非
+  丢弃音频
+- **两条路径都不支持说话人分离与声纹命名**——声纹匹配需要完整的单人
+  片段，因此只运行在离线接口。变通方案：先用 WebSocket 实时出字幕，结束
+  后把完整录音再发一次 `/v1/audio/transcriptions`（或 `/stream/v1/asr`），
+  获得带说话人分离与声纹名的分段结果（双请求模式）
 
 ## 说话人分离
 
@@ -511,6 +528,20 @@ asyncio.run(main())
 - **多语言 / 离线 / 词级时间戳**：Qwen3-ASR 1.7B + ForcedAligner（HuggingFace 渠道）
 - **说话人分离与声纹**（仅离线接口）：CAM++ 系列模型（ModelScope 渠道）
 - **下载行为**：启动时自动补下缺失模型（ModelScope 模型走 `modelscope.cn`，Qwen 模型走 HuggingFace 或 `HF_ENDPOINT` 镜像）；完全离线部署先执行一次 `./scripts/prepare-models.sh` 并拷贝 `models/` 目录
+
+**接口 × 模型对应**：
+
+| 接口 | 模型 |
+|------|------|
+| `POST /v1/audio/transcriptions` | qwen3-asr-1.7b |
+| `POST /stream/v1/asr` | qwen3-asr-1.7b |
+| `GET /v1/models`、`health`、`/stream/v1/asr/models` | 只读查询，不跑推理 |
+| `/ws/v1/asr/qwen` | qwen3-asr-1.7b |
+| `/ws/v1/asr`、`/ws/v1/asr/funasr` | paraformer-large（中文实时） |
+
+所有 HTTP 转写接口共用默认离线模型（`qwen3-asr-1.7b`，可用
+`QWEN3_ASR_MODEL=qwen3-asr-0.6b` 覆盖）；Paraformer 只服务于两个
+FunASR 兼容的 WebSocket 端点。
 
 ## 声纹数据库
 

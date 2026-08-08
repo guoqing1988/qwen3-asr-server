@@ -414,9 +414,27 @@ followed by binary audio, then `task: "stop"`. The server emits events:
 options include `format`, `sample_rate`, `enable_intermediate_result`,
 `enable_punctuation`, `enable_itn`.
 
-Streaming limitations: both paths do **not** return word-level timestamps;
-the FunASR path keeps at most ~10 seconds of pending audio and applies
-backpressure instead of dropping audio.
+**Streaming behavior** (Qwen3 path): recognition is genuinely real-time. Each
+audio chunk (default 2s) is decoded incrementally and pushed as
+`type: "result"` with `is_partial: true` — clients can render live captions.
+When a sentence finishes (3s silence or the per-segment cap) a `segment_end`
+is emitted and the text is confirmed. Latency tuning:
+
+| Param | Default | Effect |
+|-------|---------|--------|
+| `chunk_size_sec` | 2.0 | First-char latency; lower (e.g. 1.0) for more real-time feel |
+| `unfixed_token_num` | 5 | Tail rollback tokens for boundary correction |
+| `unfixed_chunk_num` | 2 | Warm-up chunks before truncation is allowed |
+
+**Streaming limitations**:
+- Both paths do **not** return word-level timestamps.
+- The FunASR path keeps at most ~10 seconds of pending audio and applies
+  backpressure instead of dropping audio.
+- **Neither path supports speaker diarization or voiceprint naming.** Voiceprint
+  matching requires complete per-speaker segments, so it only runs on the
+  offline endpoints. Workaround: transcribe live with WebSocket, then re-send
+  the full recording to `/v1/audio/transcriptions` (or `/stream/v1/asr`) to get
+  diarized segments with registered voiceprint names.
 
 ## Speaker Diarization
 
@@ -524,6 +542,20 @@ into the container. Models are split across two channels:
   (ModelScope models from `modelscope.cn`, Qwen models from HuggingFace, or the
   `HF_ENDPOINT` mirror). For fully offline deployments run
   `./scripts/prepare-models.sh` once and copy the `models/` directory.
+
+**Endpoint × model matrix**:
+
+| Endpoint | Model |
+|----------|-------|
+| `POST /v1/audio/transcriptions` | qwen3-asr-1.7b |
+| `POST /stream/v1/asr` | qwen3-asr-1.7b |
+| `GET /v1/models`, `health`, `/stream/v1/asr/models` | read-only, no inference |
+| `/ws/v1/asr/qwen` | qwen3-asr-1.7b |
+| `/ws/v1/asr`, `/ws/v1/asr/funasr` | paraformer-large (Chinese realtime) |
+
+All HTTP transcription endpoints share the default offline model
+(`qwen3-asr-1.7b`; override with `QWEN3_ASR_MODEL=qwen3-asr-0.6b`).
+Paraformer serves only the two FunASR-compatible WebSocket endpoints.
 
 ## Voiceprint Database
 
