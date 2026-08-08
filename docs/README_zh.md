@@ -210,6 +210,25 @@ python start.py
 
 ## API 接口
 
+### 鉴权
+
+在 `.env` 中配置 `API_KEY` 后，所有接口都要求认证。不同接口组接受的
+请求头不同：
+
+| 接口组 | `X-NLS-Token` | `Authorization: Bearer` |
+|--------|:---:|:---:|
+| `/api/v1/voiceprint-*`（声纹管理） | ✅ | ❌ |
+| `/stream/*`（阿里云兼容 REST） | ✅ | ❌ |
+| `/v1/*`（OpenAI 兼容） | ✅ | ✅ |
+| `/ws/v1/asr/*`（WebSocket） | 请求头或查询参数 `token` / `x_nls_token` | ❌ |
+
+说明：
+- 所有接口组都接受 `X-NLS-Token`；仅 OpenAI 兼容的 `/v1/*` 额外接受
+  `Authorization: Bearer`
+- WebSocket 浏览器端无法发送自定义请求头，因此支持查询参数传 token
+- `/docs`（Swagger）、`/redoc` 和 `/`（根路径信息）为公开页面，无需认证
+- `API_KEY` 未配置时，所有接口跳过认证
+
 ### OpenAI 兼容接口
 
 | 端点                         | 方法 | 功能                    |
