@@ -24,7 +24,8 @@ Speech recognition API service centered on [Qwen3-ASR](https://github.com/QwenLM
 - **OpenAI API Compatible** - Supports `/v1/audio/transcriptions` endpoint, works with OpenAI SDK
 - **Alibaba Cloud API Compatible** - Supports Alibaba Cloud Speech RESTful API and WebSocket streaming protocol
 - **WebSocket Real-time Streaming** - True streaming recognition with incremental partial results
-- **GPU Memory Control** - Configurable vLLM memory utilization; idle timeout auto-unloads engines and lazy-reloads on demand
+- **GPU Memory Control** - Configurable vLLM memory utilization (`QWEN_GPU_MEMORY_UTILIZATION`)
+- **Lazy Model Loading** - Auto-unloads models after idle timeout (default 5 min) to release VRAM; next request triggers automatic lazy reload
 - **Smart Far-Field Filtering** - Automatically filters far-field sounds and ambient noise in streaming ASR
 - **Intelligent Audio Segmentation** - VAD-based greedy merge algorithm for automatic long audio splitting
 - **GPU Batch Processing** - Batch inference support, 2-3x faster than sequential processing
