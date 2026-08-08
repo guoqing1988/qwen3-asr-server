@@ -404,6 +404,49 @@ Automatic long audio segmentation:
 
 At startup the service checks the current runtime model plan and downloads missing models by default. Set `HF_HUB_OFFLINE=1` only for strictly offline deployments with a prepared cache.
 
+## Voiceprint Database
+
+Persistent speaker identity matching: when a voiceprint is registered for a
+speaker, matched segments in ASR results replace the `speaker_id` value with the
+registered display name. The ASR response schema is unchanged; uncertain matches
+keep the local diarization label (`说话人1`, `Speaker1`, ...).
+
+- **Enabled by Deployment** - Controlled by `VOICEPRINT_ENABLED`, not request parameters
+- **Local Vector Store** - Uses SQLite plus `sqlite-vec`; no external PostgreSQL service is required
+- **Multiple Samples per Speaker** - Register several single-speaker clips for the same identity
+- **Conservative Matching** - Internal score uses `max_score * 0.7 + top3_mean_score * 0.3`
+
+Create a speaker with one or more voiceprint samples:
+
+```bash
+curl -X POST 'http://localhost:8000/api/v1/voiceprint-speakers' \
+  -F 'display_name=Alice' \
+  -F 'file=@speaker_reference.wav'
+```
+
+Add more samples to an existing speaker:
+
+```bash
+curl -X POST 'http://localhost:8000/api/v1/voiceprint-speakers/{speaker_id}/samples' \
+  -F 'file=@another_reference.wav'
+```
+
+List registered speakers:
+
+```bash
+curl 'http://localhost:8000/api/v1/voiceprint-speakers'
+```
+
+Soft-delete a speaker:
+
+```bash
+curl -X DELETE 'http://localhost:8000/api/v1/voiceprint-speakers/{speaker_id}'
+```
+
+The voiceprint database is persisted under `./data/voiceprints.sqlite3` (mounted
+by Docker Compose). See [docs/voiceprint-architecture.md](docs/voiceprint-architecture.md)
+for storage and matching design details.
+
 ## Environment Variables
 
 Settings in `.env.example`:
@@ -419,6 +462,9 @@ Settings in `.env.example`:
 | `QWEN_GPU_MEMORY_UTILIZATION` | auto | vLLM GPU memory utilization (0.0-1.0) for the main ASR model. Default is auto-calculated as `12GB / total VRAM`; lower it to reduce resident VRAM |
 | `QWEN_FORCE_ALIGNER_GPU_MEMORY_UTILIZATION` | inherits | GPU memory utilization for the forced aligner vLLM instance (0.0-1.0) |
 | `QWEN_IDLE_UNLOAD_TIMEOUT` | `300` | Unload vLLM engines to release VRAM after this many seconds without requests; `0` disables idle unload |
+| `VOICEPRINT_ENABLED` | `true` | Enable voiceprint identity matching in ASR results |
+| `VOICEPRINT_DB_PATH` | `./data/voiceprints.sqlite3` | SQLite + sqlite-vec voiceprint database path |
+| `VOICEPRINT_MATCH_THRESHOLD` | `0.70` | Speaker identity match threshold |
 
 ### GPU Memory Control and Idle Unload
 

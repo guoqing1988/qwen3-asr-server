@@ -402,6 +402,47 @@ curl -X POST "http://localhost:8000/stream/v1/asr?enable_speaker_diarization=tru
 
 启动时会先检测当前运行计划所需模型；如果本地缓存缺失，会自动下载。离线部署可显式设置 `HF_HUB_OFFLINE=1` 并提前准备模型缓存。
 
+## 声纹数据库
+
+支持持久化说话人身份匹配：为说话人注册声纹后，ASR 结果中匹配到的分段会把
+`speaker_id` 替换为注册的显示名。ASR 响应结构不变，匹配不确定时保留本地
+说话人分离标签（`说话人1`、`Speaker1` 等）。
+
+- **部署侧启用** - 由 `VOICEPRINT_ENABLED` 控制，不增加请求参数
+- **本地向量库** - 使用 SQLite + `sqlite-vec`，无需额外 PostgreSQL 服务
+- **同一说话人多样本** - 可为一个 speaker 注册多段单人音频
+- **保守匹配策略** - 内部分数为 `max_score * 0.7 + top3_mean_score * 0.3`
+
+创建说话人并注册一个或多个声纹样本：
+
+```bash
+curl -X POST 'http://localhost:8000/api/v1/voiceprint-speakers' \
+  -F 'display_name=Alice' \
+  -F 'file=@speaker_reference.wav'
+```
+
+给已有说话人追加样本：
+
+```bash
+curl -X POST 'http://localhost:8000/api/v1/voiceprint-speakers/{speaker_id}/samples' \
+  -F 'file=@another_reference.wav'
+```
+
+查看已注册说话人：
+
+```bash
+curl 'http://localhost:8000/api/v1/voiceprint-speakers'
+```
+
+软删除说话人：
+
+```bash
+curl -X DELETE 'http://localhost:8000/api/v1/voiceprint-speakers/{speaker_id}'
+```
+
+声纹数据库持久化在 `./data/voiceprints.sqlite3`（Docker Compose 已挂载 `./data`）。
+存储结构和匹配策略详见 [voiceprint-architecture.md](voiceprint-architecture.md)。
+
 ## 环境变量
 
 默认部署只需要关注 `.env.example` 中的少数配置：
@@ -417,6 +458,9 @@ curl -X POST "http://localhost:8000/stream/v1/asr?enable_speaker_diarization=tru
 | `QWEN_GPU_MEMORY_UTILIZATION`   | 自动计算     | 主 ASR 模型的 vLLM 显存利用率（0.0-1.0）。默认按 `12GB / 总显存` 自动计算；调低可减少常驻显存 |
 | `QWEN_FORCE_ALIGNER_GPU_MEMORY_UTILIZATION` | 继承主模型 | forced aligner（词级时间戳）vLLM 实例的显存利用率（0.0-1.0） |
 | `QWEN_IDLE_UNLOAD_TIMEOUT`      | `300`       | 无请求超过该秒数后卸载 vLLM 引擎释放显存；`0` 禁用空闲卸载 |
+| `VOICEPRINT_ENABLED`            | `true`      | 是否启用 ASR 结果声纹身份匹配 |
+| `VOICEPRINT_DB_PATH`            | `./data/voiceprints.sqlite3` | SQLite + sqlite-vec 声纹数据库路径 |
+| `VOICEPRINT_MATCH_THRESHOLD`    | `0.70`      | 说话人身份匹配阈值 |
 
 ### 显存控制与空闲卸载
 

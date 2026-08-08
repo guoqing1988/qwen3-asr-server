@@ -73,6 +73,11 @@ class Settings:
     # 空闲自动卸载配置（秒；超过该时长无请求则卸载 vLLM 引擎释放显存，0=禁用）
     QWEN_IDLE_UNLOAD_TIMEOUT: int = 300
 
+    # Voiceprint identification configuration.
+    VOICEPRINT_ENABLED: bool = True
+    VOICEPRINT_DB_PATH: str = str(BASE_DIR / "data" / "voiceprints.sqlite3")
+    VOICEPRINT_MATCH_THRESHOLD: float = 0.70
+
     def __init__(self):
         """从环境变量读取配置"""
         self._load_from_env()
@@ -132,6 +137,20 @@ class Settings:
 
         self.QWEN_IDLE_UNLOAD_TIMEOUT = int(
             os.getenv("QWEN_IDLE_UNLOAD_TIMEOUT", str(self.QWEN_IDLE_UNLOAD_TIMEOUT))
+        )
+
+        self.VOICEPRINT_ENABLED = (
+            os.getenv("VOICEPRINT_ENABLED", str(self.VOICEPRINT_ENABLED)).lower()
+            in {"1", "true", "yes", "on"}
+        )
+        self.VOICEPRINT_DB_PATH = (
+            os.getenv("VOICEPRINT_DB_PATH") or self.VOICEPRINT_DB_PATH
+        ).strip()
+        self.VOICEPRINT_MATCH_THRESHOLD = float(
+            os.getenv(
+                "VOICEPRINT_MATCH_THRESHOLD",
+                str(self.VOICEPRINT_MATCH_THRESHOLD),
+            )
         )
 
 

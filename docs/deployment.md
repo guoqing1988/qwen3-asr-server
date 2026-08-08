@@ -225,6 +225,19 @@ volumes:
 复制 `.env.example` 为 `.env`，仅修改其中已说明的公开变量。GPU 和 CPU
 Compose 文件是运行时配置的唯一来源；其余调优参数保留代码默认值。
 
+### 声纹数据库配置
+
+| 环境变量 | 默认值 | 说明 |
+|----------|--------|------|
+| `VOICEPRINT_ENABLED` | `true` | 是否启用 ASR 结果声纹身份匹配 |
+| `VOICEPRINT_DB_PATH` | `./data/voiceprints.sqlite3` | SQLite + sqlite-vec 声纹数据库路径 |
+| `VOICEPRINT_MATCH_THRESHOLD` | `0.70` | 说话人身份匹配阈值 |
+
+启用后通过 `/api/v1/voiceprint-speakers` 注册说话人（名字 + 单人音频样本），
+ASR 转写结果中匹配到的 `speaker_id` 会自动替换为注册名；未注册或匹配不
+确定的说话人保留原始标签。接口与匹配策略详见
+[voiceprint-architecture.md](voiceprint-architecture.md)。
+
 ## 服务监控
 
 ### 健康检查
