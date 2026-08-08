@@ -343,6 +343,74 @@ curl -X POST "http://localhost:8000/stream/v1/asr?enable_speaker_diarization=tru
 }
 ```
 
+### WebSocket 流式接口
+
+`/ws/v1/asr` 下提供三个 WebSocket 端点：
+
+| 端点 | 后端 | 说明 |
+|------|------|------|
+| `/ws/v1/asr` | FunASR realtime（Paraformer） | 阿里云协议兼容，中文流式 + 实时标点 |
+| `/ws/v1/asr/funasr` | FunASR realtime | 上述端点的向后兼容别名 |
+| `/ws/v1/asr/qwen` | Qwen3-ASR（vLLM） | Qwen3 流式，多语言（中/英/日等） |
+
+鉴权：浏览器端 WebSocket 无法发送自定义请求头，通过查询参数传 API key
+（`?token=YOUR_KEY` 或 `x_nls_token`）；未配置 `API_KEY` 时免鉴权。
+
+**Qwen3 流式协议**（`/ws/v1/asr/qwen`）——JSON 控制消息 + 二进制音频帧：
+
+1. 连接后发送 `start`：
+   ```json
+   {"type": "start", "payload": {
+     "format": "pcm",              // "pcm" 或 "wav"
+     "sample_rate": 16000,
+     "language": "zh",             // 可选，自动检测
+     "context": "",                // 热词上下文
+     "enable_inverse_text_normalization": true,
+     "chunk_size_sec": 2.0,
+     "unfixed_chunk_num": 2,
+     "unfixed_token_num": 5
+   }}
+   ```
+2. 服务器回 `started`（带生效参数）
+3. 持续发送二进制音频帧（16kHz int16 PCM 或 WAV 字节）
+4. 服务器增量返回 `segment_start` / `segment_end`，`segment_end` 携带累计
+   全文（`result.text`）和已确认文本列表
+5. 发送 `{"type": "stop"}` 结束；错误以 `{"type": "error", ...}` 返回
+
+Python 示例：
+
+```python
+import asyncio, json, websockets
+
+async def main():
+    async with websockets.connect(
+        "ws://localhost:8000/ws/v1/asr/qwen?token=YOUR_API_KEY"
+    ) as ws:
+        await ws.send(json.dumps({"type": "start", "payload": {"format": "pcm"}}))
+        with open("audio.wav", "rb") as f:
+            f.read(44)  # 跳过 WAV 头
+            while chunk := f.read(3200):  # 16kHz int16，0.1s 一帧
+                await ws.send(chunk)
+        await ws.send(json.dumps({"type": "stop"}))
+        async for raw in ws:
+            msg = json.loads(raw)
+            if msg.get("type") == "segment_end":
+                print(msg["result"]["text"])
+
+asyncio.run(main())
+```
+
+**FunASR 流式协议**（`/ws/v1/asr` 与 `/ws/v1/asr/funasr`）——阿里云 NLS
+风格：先发 JSON 帧（`{"header": {"message_id": "...", "task": "start"},
+"payload": {...}}`），随后发二进制音频，最后发 `task: "stop"`。服务器事件
+顺序：`TranscriptionStarted` → `SentenceBegin` → `TranscriptionResultChanged`
+（中间结果）→ `SentenceEnd` → `TranscriptionCompleted`。payload 支持
+`format`、`sample_rate`、`enable_intermediate_result`、`enable_punctuation`、
+`enable_itn` 等参数。
+
+流式限制：两条路径都不返回词级时间戳；FunASR 路径最多保留约 10 秒待处理
+音频，队列满时对发送端施加背压而非丢弃音频。
+
 ## 说话人分离
 
 基于 CAM++ 模型实现多说话人自动识别：

@@ -346,6 +346,78 @@ curl -X POST "http://localhost:8000/stream/v1/asr?enable_speaker_diarization=tru
 }
 ```
 
+### WebSocket Streaming API
+
+Three WebSocket endpoints are available under `/ws/v1/asr`:
+
+| Endpoint | Backend | Notes |
+|----------|---------|-------|
+| `/ws/v1/asr` | FunASR realtime (Paraformer) | Alibaba Cloud protocol compatible, Chinese streaming with realtime punctuation |
+| `/ws/v1/asr/funasr` | FunASR realtime | Backward-compatible alias of the above |
+| `/ws/v1/asr/qwen` | Qwen3-ASR (vLLM) | Qwen3 streaming, multilingual (zh/en/ja/...) |
+
+Authentication: WebSocket connections cannot send custom headers from
+browsers, so pass the API key as a query parameter (`?token=YOUR_KEY` or
+`x_nls_token`). Skipped when `API_KEY` is not configured.
+
+**Qwen3 streaming protocol** (`/ws/v1/asr/qwen`) - JSON control messages plus
+binary audio frames:
+
+1. Connect, then send `start`:
+   ```json
+   {"type": "start", "payload": {
+     "format": "pcm",              // "pcm" or "wav"
+     "sample_rate": 16000,
+     "language": "zh",             // optional, auto-detected
+     "context": "",                // hotword context
+     "enable_inverse_text_normalization": true,
+     "chunk_size_sec": 2.0,
+     "unfixed_chunk_num": 2,
+     "unfixed_token_num": 5
+   }}
+   ```
+2. Server replies `started` with the applied params.
+3. Send binary audio frames continuously (16kHz int16 PCM, or WAV bytes).
+4. Server emits `segment_start` / `segment_end` incrementally; `segment_end`
+   carries the full transcript so far (`result.text`) and the confirmed list.
+5. Send `{"type": "stop"}` to finish; errors arrive as `{"type": "error", ...}`.
+
+Python example:
+
+```python
+import asyncio, json, websockets
+
+async def main():
+    async with websockets.connect(
+        "ws://localhost:8000/ws/v1/asr/qwen?token=YOUR_API_KEY"
+    ) as ws:
+        await ws.send(json.dumps({"type": "start", "payload": {"format": "pcm"}}))
+        with open("audio.wav", "rb") as f:
+            f.read(44)  # skip WAV header
+            while chunk := f.read(3200):  # 0.1s frames @16kHz int16
+                await ws.send(chunk)
+        await ws.send(json.dumps({"type": "stop"}))
+        async for raw in ws:
+            msg = json.loads(raw)
+            if msg.get("type") == "segment_end":
+                print(msg["result"]["text"])
+
+asyncio.run(main())
+```
+
+**FunASR streaming protocol** (`/ws/v1/asr` and `/ws/v1/asr/funasr`) -
+Alibaba Cloud NLS style: send JSON frames
+(`{"header": {"message_id": "...", "task": "start"}, "payload": {...}}`)
+followed by binary audio, then `task: "stop"`. The server emits events:
+`TranscriptionStarted` → `SentenceBegin` → `TranscriptionResultChanged`
+(intermediate results) → `SentenceEnd` → `TranscriptionCompleted`. Payload
+options include `format`, `sample_rate`, `enable_intermediate_result`,
+`enable_punctuation`, `enable_itn`.
+
+Streaming limitations: both paths do **not** return word-level timestamps;
+the FunASR path keeps at most ~10 seconds of pending audio and applies
+backpressure instead of dropping audio.
+
 ## Speaker Diarization
 
 Multi-speaker automatic identification based on CAM++ model:
