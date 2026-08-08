@@ -356,6 +356,23 @@ Three WebSocket endpoints are available under `/ws/v1/asr`:
 | `/ws/v1/asr/funasr` | FunASR realtime | Backward-compatible alias of the above |
 | `/ws/v1/asr/qwen` | Qwen3-ASR (vLLM) | Qwen3 streaming, multilingual (zh/en/ja/...) |
 
+All three endpoints are **real-time speech transcription** — audio is sent
+incrementally and partial results stream back while speaking. This is the
+fundamental difference from the offline HTTP endpoints:
+
+| | WebSocket (real-time) | HTTP offline (`/v1/*`, `/stream/v1/asr`) |
+|---|---|---|
+| Interaction | Long-lived connection, send audio while receiving results | Submit the full audio once, wait synchronously |
+| Results | Partial increments → `segment_end` confirmation | Full result (segments + timestamps) |
+| Speaker diarization | ❌ | ✅ |
+| Voiceprint naming | ❌ | ✅ |
+| Word-level timestamps | ❌ | ✅ |
+| Best for | Live captions, voice assistants, intercom | Recording transcription, meeting minutes, post-analysis |
+
+For "real-time + speakers", use the dual-request pattern: WebSocket for live
+captions, then re-send the full recording to the offline endpoint for
+diarized/voiceprint-named segments.
+
 Authentication: WebSocket connections cannot send custom headers from
 browsers, so pass the API key as a query parameter (`?token=YOUR_KEY` or
 `x_nls_token`). Skipped when `API_KEY` is not configured.

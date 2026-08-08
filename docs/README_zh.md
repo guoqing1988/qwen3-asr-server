@@ -353,6 +353,21 @@ curl -X POST "http://localhost:8000/stream/v1/asr?enable_speaker_diarization=tru
 | `/ws/v1/asr/funasr` | FunASR realtime | 上述端点的向后兼容别名 |
 | `/ws/v1/asr/qwen` | Qwen3-ASR（vLLM） | Qwen3 流式，多语言（中/英/日等） |
 
+三个端点都是**实时语音转录**——音频增量发送，说话的同时返回增量结果。
+这与离线 HTTP 接口有本质区别：
+
+| | WebSocket（实时） | HTTP 离线（`/v1/*`、`/stream/v1/asr`） |
+|---|---|---|
+| 交互方式 | 长连接，边传音频边收结果 | 一次性提交完整音频，同步等待 |
+| 结果 | 增量 partial → `segment_end` 确认 | 完整结果（分段 + 时间戳） |
+| 说话人分离 | ❌ | ✅ |
+| 声纹命名 | ❌ | ✅ |
+| 词级时间戳 | ❌ | ✅ |
+| 适合场景 | 实时字幕、语音助手、对讲 | 录音转写、会议纪要、事后分析 |
+
+需要"实时 + 说话人"时使用双请求模式：WebSocket 实时出字幕，结束后把
+完整录音再发离线接口，获得带说话人分离/声纹名的分段结果。
+
 鉴权：浏览器端 WebSocket 无法发送自定义请求头，通过查询参数传 API key
 （`?token=YOUR_KEY` 或 `x_nls_token`）；未配置 `API_KEY` 时免鉴权。
 
