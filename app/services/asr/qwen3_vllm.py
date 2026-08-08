@@ -13,6 +13,7 @@ from typing import Any, Optional
 
 import librosa
 import numpy as np
+import torch
 
 from app.infrastructure import resolve_huggingface_snapshot_dir
 from app.utils.text_processing import normalize_asr_text
@@ -247,6 +248,32 @@ class Qwen3VLLMBackend:
     def ensure_forced_aligner_loaded(self) -> None:
         if self._forced_aligner_path:
             self._get_forced_aligner()
+
+    def shutdown(self) -> None:
+        """释放 vLLM 引擎占用的 GPU 显存。
+
+        终止主模型与 forced aligner 的 EngineCore 子进程（显存随之归还），
+        并清空本进程内的 CUDA 缓存。卸载后引擎不可用，需重建 Qwen3VLLMBackend。
+        """
+        import gc
+
+        for name, llm in (("main", self._llm), ("forced_aligner", self._forced_aligner)):
+            if llm is None:
+                continue
+            engine_core = getattr(getattr(llm, "llm_engine", None), "engine_core", None)
+            if engine_core is not None and hasattr(engine_core, "shutdown"):
+                try:
+                    engine_core.shutdown(timeout=10.0)
+                    logger.info("vLLM %s engine core shutdown complete", name)
+                except Exception as exc:  # noqa: BLE001 - 卸载失败不应阻断流程
+                    logger.warning("Failed to shutdown %s vLLM engine core: %s", name, exc)
+
+        self._forced_aligner = None
+        self._llm = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        logger.info("Qwen3VLLMBackend shutdown complete, GPU memory released")
 
     def _run_generate(
         self,

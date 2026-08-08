@@ -611,6 +611,19 @@ class Qwen3ASREngine(BaseASREngine):
     def is_model_loaded(self) -> bool:
         return self.model is not None
 
+    def unload(self) -> None:
+        """卸载模型并释放 GPU 显存（vLLM 后端）。
+
+        卸载后引擎对象保留（用于懒加载重建的占位），下次请求时由
+        RuntimeRouter 自动重建。Rust CPU 后端无需卸载，直接置空。
+        """
+        if self.model is None:
+            return
+        if self._backend == "vllm":
+            self.model.shutdown()
+        self.model = None
+        logger.info("Qwen3-ASR model unloaded (backend=%s)", self._backend)
+
     @property
     def device(self) -> str:
         return self._device

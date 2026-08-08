@@ -105,9 +105,17 @@ async def lifespan(app: FastAPI):
     logger.info(f"Worker [{worker_id}] 已就绪")
     emit_boot_event("ready", phase="worker", message=f"Worker [{worker_id}] 已就绪")
 
+    # 启动空闲自动卸载监控（QWEN_IDLE_UNLOAD_TIMEOUT=0 时内部自动跳过）
+    from .services.asr.runtime.router import get_runtime_router
+
+    runtime_router = get_runtime_router()
+    runtime_router.start_idle_unload_monitor()
+
     yield
 
     # 关闭时
+    logger.info(f"Worker [{worker_id}] 正在关闭空闲卸载监控...")
+    runtime_router.stop_idle_unload_monitor()
     logger.info(f"Worker [{worker_id}] 正在关闭推理线程池...")
     shutdown_executor()
     logger.info(f"Worker [{worker_id}] 已关闭")

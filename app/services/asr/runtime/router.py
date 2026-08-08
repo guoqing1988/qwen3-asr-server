@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 import asyncio
+import logging
 import threading
+import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import Awaitable, Callable, Optional
@@ -17,6 +19,8 @@ from app.services.asr.engines import ASRFullResult, BaseASREngine
 from app.services.asr.manager import get_model_manager
 from app.services.asr.qwenasr_rust import is_qwenasr_rust_available
 from .local_pool import LocalEnginePool
+
+logger = logging.getLogger(__name__)
 
 _VLLM_SHARED_CONCURRENCY = 8
 
@@ -82,6 +86,16 @@ class RuntimeRouter:
         self._pool_lock = threading.Lock()
         self._loaded_model_ids: set[str] = set()
 
+        # 空闲自动卸载状态（仅 vLLM 共享引擎）：
+        # - _last_use: 引擎最后一次被使用的时间（monotonic）
+        # - _active_requests: 当前持有引擎的活跃请求数
+        # - _load_locks: 每引擎重建锁，防止卸载/加载并发竞态
+        # - _unload_monitor_task: 空闲监控后台任务
+        self._last_use: dict[tuple[RuntimeFamily, str], float] = {}
+        self._active_requests: dict[tuple[RuntimeFamily, str], int] = {}
+        self._load_locks: dict[tuple[RuntimeFamily, str], asyncio.Lock] = {}
+        self._unload_monitor_task: asyncio.Task | None = None
+
     def resolve_model_id(self, model_id: Optional[str]) -> str:
         if model_id:
             return model_id
@@ -125,25 +139,57 @@ class RuntimeRouter:
             self._loaded_model_ids.add(model_id)
             return pool
 
+    @staticmethod
+    def _engine_loaded(engine: BaseASREngine | None) -> bool:
+        return engine is not None and getattr(engine, "is_model_loaded", lambda: True)()
+
     def _get_shared_engine(
         self, family: RuntimeFamily, model_id: str
     ) -> tuple[BaseASREngine, asyncio.Semaphore]:
+        """同步获取共享引擎（warmup/启动路径）。引擎被卸载后自动重建。"""
         runtime_key = (family, model_id)
         engine = self._shared_engines.get(runtime_key)
         semaphore = self._shared_limits.get(runtime_key)
-        if engine is not None and semaphore is not None:
+        if self._engine_loaded(engine) and semaphore is not None:
             return engine, semaphore
 
         with self._pool_lock:
             engine = self._shared_engines.get(runtime_key)
             semaphore = self._shared_limits.get(runtime_key)
-            if engine is None:
+            if not self._engine_loaded(engine):
                 engine = self._manager.create_engine(model_id)
                 self._shared_engines[runtime_key] = engine
                 self._loaded_model_ids.add(model_id)
+                self._last_use[runtime_key] = time.monotonic()
             if semaphore is None:
                 semaphore = asyncio.Semaphore(_VLLM_SHARED_CONCURRENCY)
                 self._shared_limits[runtime_key] = semaphore
+            return engine, semaphore
+
+    async def _ensure_shared_engine_loaded(
+        self, family: RuntimeFamily, model_id: str
+    ) -> tuple[BaseASREngine, asyncio.Semaphore]:
+        """请求路径获取共享引擎；已卸载时懒加载重建（异步，不阻塞事件循环）。
+
+        与空闲卸载共用 per-key 锁，保证卸载/重建互斥。
+        """
+        runtime_key = (family, model_id)
+        lock = self._load_locks.setdefault(runtime_key, asyncio.Lock())
+        async with lock:
+            engine = self._shared_engines.get(runtime_key)
+            semaphore = self._shared_limits.get(runtime_key)
+            if semaphore is None:
+                semaphore = asyncio.Semaphore(_VLLM_SHARED_CONCURRENCY)
+                self._shared_limits[runtime_key] = semaphore
+            if self._engine_loaded(engine):
+                return engine, semaphore
+            logger.info("Engine %s was unloaded, lazy loading...", model_id)
+            # 模型加载耗时长，放入线程池避免阻塞事件循环
+            engine = await asyncio.to_thread(self._manager.create_engine, model_id)
+            self._shared_engines[runtime_key] = engine
+            self._loaded_model_ids.add(model_id)
+            self._last_use[runtime_key] = time.monotonic()
+            logger.info("Engine %s lazy loaded", model_id)
             return engine, semaphore
 
     def warmup_model(self, model_id: Optional[str] = None) -> None:
@@ -179,11 +225,27 @@ class RuntimeRouter:
         resolved_model_id = self.resolve_model_id(model_id)
         family = self._resolve_family(resolved_model_id)
         if family == RuntimeFamily.QWEN_VLLM:
-            engine, semaphore = self._get_shared_engine(family, resolved_model_id)
-            await semaphore.acquire()
+            runtime_key = (family, resolved_model_id)
+            # 等待信号量期间引擎可能被空闲监控卸载，拿到后需确认仍已加载
+            while True:
+                engine, semaphore = await self._ensure_shared_engine_loaded(
+                    family, resolved_model_id
+                )
+                await semaphore.acquire()
+                if self._engine_loaded(engine):
+                    break
+                logger.warning(
+                    "Engine %s was unloaded while waiting for semaphore, reloading",
+                    resolved_model_id,
+                )
+                semaphore.release()
+            self._active_requests[runtime_key] = (
+                self._active_requests.get(runtime_key, 0) + 1
+            )
+            self._last_use[runtime_key] = time.monotonic()
             return RuntimeEngineLease(
                 engine=engine,
-                release_callback=semaphore.release,
+                release_callback=self._make_vllm_release(runtime_key, semaphore),
             )
         pool = self._create_pool(family, resolved_model_id)
         engine = await pool.acquire()
@@ -191,6 +253,17 @@ class RuntimeRouter:
             engine=engine,
             release_callback=lambda: pool.release(engine),
         )
+
+    def _make_vllm_release(
+        self, runtime_key: tuple[RuntimeFamily, str], semaphore: asyncio.Semaphore
+    ) -> Callable[[], None]:
+        def release() -> None:
+            self._active_requests[runtime_key] = max(
+                0, self._active_requests.get(runtime_key, 0) - 1
+            )
+            semaphore.release()
+
+        return release
 
     async def run_offline(self, request: OfflineASRRequest) -> ASRFullResult:
         model_id = self.resolve_model_id(request.model_id)
@@ -218,6 +291,83 @@ class RuntimeRouter:
                 timestamp_scale=request.timestamp_scale,
                 task_id=request.task_id,
             )
+
+    # ------------------------------------------------------------------
+    # 空闲自动卸载（仅 vLLM 共享引擎）
+    # ------------------------------------------------------------------
+
+    def start_idle_unload_monitor(self) -> None:
+        """启动空闲自动卸载监控后台任务。"""
+        timeout = settings.QWEN_IDLE_UNLOAD_TIMEOUT
+        if timeout <= 0:
+            logger.info("QWEN_IDLE_UNLOAD_TIMEOUT=%s, idle unload disabled", timeout)
+            return
+        if self._unload_monitor_task is None or self._unload_monitor_task.done():
+            self._unload_monitor_task = asyncio.create_task(self._idle_unload_loop())
+            logger.info(
+                "Idle unload monitor started (timeout=%ss, family=%s)",
+                timeout,
+                RuntimeFamily.QWEN_VLLM.value,
+            )
+
+    def stop_idle_unload_monitor(self) -> None:
+        """停止空闲自动卸载监控后台任务。"""
+        if self._unload_monitor_task is not None:
+            self._unload_monitor_task.cancel()
+            self._unload_monitor_task = None
+            logger.info("Idle unload monitor stopped")
+
+    async def _idle_unload_loop(self) -> None:
+        timeout = settings.QWEN_IDLE_UNLOAD_TIMEOUT
+        check_interval = min(max(timeout / 3, 5), 60)
+        while True:
+            await asyncio.sleep(check_interval)
+            try:
+                await self._unload_idle_engines(timeout)
+            except Exception as exc:  # noqa: BLE001 - 监控任务不应因单次异常退出
+                logger.warning("Idle unload check failed: %s", exc)
+
+    async def _unload_idle_engines(self, timeout: float) -> None:
+        """卸载超过 idle 阈值且无活跃请求/等待者的 vLLM 引擎。"""
+        now = time.monotonic()
+        for runtime_key, engine in list(self._shared_engines.items()):
+            if runtime_key[0] != RuntimeFamily.QWEN_VLLM:
+                continue
+            if not self._engine_loaded(engine):
+                continue
+            if self._active_requests.get(runtime_key, 0) > 0:
+                continue
+            semaphore = self._shared_limits.get(runtime_key)
+            # 有请求在等待信号量时不可卸载
+            if semaphore is not None and semaphore.locked():
+                continue
+            last_use = self._last_use.get(runtime_key)
+            if last_use is None or now - last_use < timeout:
+                continue
+
+            model_id = runtime_key[1]
+            lock = self._load_locks.setdefault(runtime_key, asyncio.Lock())
+            async with lock:
+                # 等待锁期间可能有新请求进来，二次检查
+                if not self._engine_loaded(engine):
+                    continue
+                if self._active_requests.get(runtime_key, 0) > 0:
+                    continue
+                if semaphore is not None and semaphore.locked():
+                    continue
+                logger.info(
+                    "Engine %s idle for %.0fs, unloading to release GPU memory",
+                    model_id,
+                    now - last_use,
+                )
+                try:
+                    await asyncio.to_thread(engine.unload)
+                except Exception as exc:  # noqa: BLE001 - 卸载失败不阻断监控
+                    logger.error("Failed to unload engine %s: %s", model_id, exc)
+                    continue
+                self._shared_engines.pop(runtime_key, None)
+                self._loaded_model_ids.discard(model_id)
+                logger.info("Engine %s unloaded, GPU memory released", model_id)
 
 
 _runtime_router: Optional[RuntimeRouter] = None

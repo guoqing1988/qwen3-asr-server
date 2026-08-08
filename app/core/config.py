@@ -70,6 +70,9 @@ class Settings:
     QWEN_RUST_CPU_WORKERS: int = 4
     FUNASR_WORKERS: int = 1
 
+    # 空闲自动卸载配置（秒；超过该时长无请求则卸载 vLLM 引擎释放显存，0=禁用）
+    QWEN_IDLE_UNLOAD_TIMEOUT: int = 300
+
     def __init__(self):
         """从环境变量读取配置"""
         self._load_from_env()
@@ -125,6 +128,10 @@ class Settings:
         )
         self.FUNASR_WORKERS = int(
             os.getenv("FUNASR_WORKERS", str(self.FUNASR_WORKERS))
+        )
+
+        self.QWEN_IDLE_UNLOAD_TIMEOUT = int(
+            os.getenv("QWEN_IDLE_UNLOAD_TIMEOUT", str(self.QWEN_IDLE_UNLOAD_TIMEOUT))
         )
 
 
