@@ -205,6 +205,21 @@ Notes:
 - `/docs` (Swagger), `/redoc` and `/` (root info) are public and need no auth.
 - When `API_KEY` is empty, authentication is skipped for all endpoints.
 
+### HTTP Transcription Endpoints Compared
+
+Both offline transcription endpoints are **synchronous** (submit the full
+audio, wait, and get the complete result in one response). Both use
+qwen3-asr-1.7b and support speaker diarization, voiceprint naming and
+word-level timestamps. True streaming lives on the WebSocket endpoints below:
+
+| Aspect | `/stream/v1/asr` (Alibaba Cloud compatible) | `/v1/audio/transcriptions` (OpenAI compatible) |
+|--------|---------------------------------------------|-------------------------------------------------|
+| Input | Raw audio body (octet-stream) or `audio_address` URL; no multipart upload | `file` upload or `audio_address` URL |
+| Hotwords | ✅ `vocabulary_id` | `prompt` (reserved) |
+| Language | Auto-detected | ✅ `language` parameter |
+| Response | Fixed Alibaba Cloud JSON (`task_id`/`status`/`result`/`processing_time`) | `json` / `text` / `srt` / `vtt` / `verbose_json` |
+| Best for | Migrating Alibaba NLS clients (hotwords, same protocol) | OpenAI ecosystem (SDK, subtitle output) |
+
 ### OpenAI Compatible API
 
 | Endpoint | Method | Function |

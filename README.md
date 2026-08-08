@@ -205,6 +205,20 @@ python start.py
 - `/docs`（Swagger）、`/redoc` 和 `/`（根路径信息）为公开页面，无需认证
 - `API_KEY` 未配置时，所有接口跳过认证
 
+### HTTP 转写接口对比
+
+两个离线转写端点都是**同步**接口（提交完整音频后等待一次返回完整结果），
+均走 qwen3-asr-1.7b，支持说话人分离、声纹命名与词级时间戳。真正的流式是
+WebSocket 端点（见下文）：
+
+| 维度 | `/stream/v1/asr`（阿里云兼容） | `/v1/audio/transcriptions`（OpenAI 兼容） |
+|------|------------------------------|------------------------------------------|
+| 输入方式 | 请求体原始音频（octet-stream）或 `audio_address` URL；不支持 multipart 上传 | `file` 文件上传 或 `audio_address` URL |
+| 热词 | ✅ `vocabulary_id` | `prompt`（保留字段） |
+| 语言指定 | 自动检测 | ✅ `language` 参数 |
+| 响应格式 | 固定阿里云 JSON（`task_id`/`status`/`result`/`processing_time`） | `json` / `text` / `srt` / `vtt` / `verbose_json` |
+| 适合场景 | 阿里云 NLS 老客户端迁移（热词、协议一致） | OpenAI 生态（OpenAI SDK、字幕输出） |
+
 ### OpenAI 兼容接口
 
 | 端点                         | 方法 | 功能                    |
