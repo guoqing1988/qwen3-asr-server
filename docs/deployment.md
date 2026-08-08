@@ -189,6 +189,69 @@ docker build -t qwen3-asr:gpu-cu130 -f Dockerfile.gpu \
 | `TORCH_CUDA_ARCH_LIST` | `12.0+PTX` | 指定 JIT 编译目标架构 |
 | `VLLM_PACKAGE` | `vllm[audio]==0.19.0` | 覆盖 vLLM 包版本或来源 |
 
+### 生产部署到其他服务器
+
+**依赖会自动包含**：Dockerfile 使用 `uv sync --frozen` 按 `pyproject.toml` +
+`uv.lock` 安装全部依赖，因此重建镜像后 `sqlite-vec`（声纹向量库）等新依赖
+已内置，无需手工安装。
+
+**生产环境不要挂载源码卷**。仓库内 `docker-compose.yml` 的
+`./app:/app/app` 挂载是本地开发模式（改代码即生效）；生产部署请使用本地
+构建的镜像，代码以镜像内为准：
+
+```yaml
+# docker-compose.prod.yml（生产示例）
+services:
+  qwen3-asr:
+    image: qwen3-asr:gpu-latest          # 本地构建的镜像 tag
+    container_name: qwen3-asr
+    ports:
+      - "${NGINX_PORT:-9101}:8000"
+    volumes:
+      # 仅挂载运行时数据目录，不挂载源码
+      - ./temp:/app/temp
+      - ./logs:/app/logs
+      - ./data:/app/data
+      - ./models/modelscope:/root/.cache/modelscope
+      - ./models/huggingface:/root/.cache/huggingface
+    runtime: nvidia
+    environment:
+      API_KEY: ${API_KEY:-}
+      HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-0}
+      HF_ENDPOINT: ${HF_ENDPOINT:-}
+      QWEN3_ASR_MODEL: ${QWEN3_ASR_MODEL:-}
+      CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-0}
+      QWEN_GPU_MEMORY_UTILIZATION: ${QWEN_GPU_MEMORY_UTILIZATION:-}
+      QWEN_FORCE_ALIGNER_GPU_MEMORY_UTILIZATION: ${QWEN_FORCE_ALIGNER_GPU_MEMORY_UTILIZATION:-}
+      QWEN_IDLE_UNLOAD_TIMEOUT: ${QWEN_IDLE_UNLOAD_TIMEOUT:-300}
+      VOICEPRINT_ENABLED: ${VOICEPRINT_ENABLED:-true}
+      VOICEPRINT_DB_PATH: ${VOICEPRINT_DB_PATH:-./data/voiceprints.sqlite3}
+      VOICEPRINT_MATCH_THRESHOLD: ${VOICEPRINT_MATCH_THRESHOLD:-0.70}
+    restart: unless-stopped
+```
+
+部署清单（新服务器功能一致的四个条件）：
+
+```bash
+# 1. 拉代码并切到目标分支（含 pyproject.toml 新依赖）
+git clone <your-repo> && git checkout feature/voiceprint
+
+# 2. 重建镜像（uv sync 自动包含 sqlite-vec 等依赖）
+./build.sh -t gpu -v latest
+
+# 3. 准备 .env（端口、显存控制、声纹、鉴权）
+cp .env.example .env && vim .env
+
+# 4. 迁移声纹注册数据（可选：保留已注册的说话人名字）
+scp ./data/voiceprints.sqlite3 user@new-server:/opt/qwen3-asr/data/
+
+# 5. 模型缓存：在线环境启动时自动下载；离线环境用
+./scripts/prepare-models.sh   # 打包后 scp 到新服务器解压
+```
+
+**声纹数据库（`./data/voiceprints.sqlite3`）只存 embedding 向量与显示名，
+不含音频本身**；不迁移则需在新服务器重新注册说话人。
+
 ### 模型下载
 
 启动时会先检测当前运行计划所需模型；如果本地缓存缺失，会自动下载。离线部署可显式设置 `HF_HUB_OFFLINE=1` 并提前准备模型缓存。
