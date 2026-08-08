@@ -100,9 +100,8 @@ async def create_voiceprint_speaker(
     - `file`: 一个或多个**单人**参考音频（wav/mp3/mp4 等，自动归一化到
       16kHz）；建议每段 2 秒以上纯语音，多个样本可提升匹配准确率
 
-    鉴权: 需要 `X-NLS-Token` 请求头（未配置 API_KEY 时免鉴权）。
-    注意：本接口与 `/stream/*` 一致仅接受 `X-NLS-Token`，不接受
-    `Authorization: Bearer`（OpenAI 兼容的 `/v1/*` 接口才两者皆可）
+    鉴权: 需要 `X-NLS-Token` 或 `Authorization: Bearer` 请求头（未配置
+    API_KEY 时免鉴权）
 
     示例:
         curl -X POST 'http://localhost:9101/api/v1/voiceprint-speakers' \\

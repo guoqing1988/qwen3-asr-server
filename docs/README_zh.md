@@ -217,14 +217,14 @@ python start.py
 
 | 接口组 | `X-NLS-Token` | `Authorization: Bearer` |
 |--------|:---:|:---:|
-| `/api/v1/voiceprint-*`（声纹管理） | ✅ | ❌ |
-| `/stream/*`（阿里云兼容 REST） | ✅ | ❌ |
+| `/api/v1/voiceprint-*`（声纹管理） | ✅ | ✅ |
+| `/stream/*`（阿里云兼容 REST） | ✅ | ✅ |
 | `/v1/*`（OpenAI 兼容） | ✅ | ✅ |
 | `/ws/v1/asr/*`（WebSocket） | 请求头或查询参数 `token` / `x_nls_token` | ❌ |
 
 说明：
-- 所有接口组都接受 `X-NLS-Token`；仅 OpenAI 兼容的 `/v1/*` 额外接受
-  `Authorization: Bearer`
+- 所有 HTTP 接口组同时接受 `X-NLS-Token` 与 `Authorization: Bearer`
+  （`X-NLS-Token` 优先）
 - WebSocket 浏览器端无法发送自定义请求头，因此支持查询参数传 token
 - `/docs`（Swagger）、`/redoc` 和 `/`（根路径信息）为公开页面，无需认证
 - `API_KEY` 未配置时，所有接口跳过认证

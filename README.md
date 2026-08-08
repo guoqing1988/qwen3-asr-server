@@ -219,16 +219,16 @@ Different endpoint groups accept different headers:
 
 | Endpoint group | `X-NLS-Token` | `Authorization: Bearer` |
 |----------------|:---:|:---:|
-| `/api/v1/voiceprint-*` (voiceprint management) | ✅ | ❌ |
-| `/stream/*` (Alibaba Cloud compatible REST) | ✅ | ❌ |
+| `/api/v1/voiceprint-*` (voiceprint management) | ✅ | ✅ |
+| `/stream/*` (Alibaba Cloud compatible REST) | ✅ | ✅ |
 | `/v1/*` (OpenAI compatible) | ✅ | ✅ |
 | `/ws/v1/asr/*` (WebSocket) | header or query param `token` / `x_nls_token` | ❌ |
 
 Notes:
-- All groups accept `X-NLS-Token`; only OpenAI-compatible `/v1/*` also accepts
-  `Authorization: Bearer`.
-- WebSocket connections cannot send headers from browsers, so tokens are
-  accepted via query parameters.
+- All HTTP endpoint groups accept both `X-NLS-Token` and
+  `Authorization: Bearer` (`X-NLS-Token` takes precedence).
+- WebSocket connections cannot send custom headers from browsers, so tokens
+  are accepted via query parameters (`token` / `x_nls_token`).
 - `/docs` (Swagger), `/redoc` and `/` (root info) are public and need no auth.
 - When `API_KEY` is empty, authentication is skipped for all endpoints.
 

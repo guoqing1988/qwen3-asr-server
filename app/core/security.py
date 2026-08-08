@@ -144,10 +144,14 @@ def _validate_resolved_token(
 
 
 def validate_token(request: Request, task_id: str = "") -> tuple[bool, str]:
-    """验证X-NLS-Token头部"""
+    """验证 X-NLS-Token 或 Authorization: Bearer 头部。
+
+    声纹 / 阿里云兼容接口与 OpenAI 兼容接口统一鉴权：两种头部都接受，
+    X-NLS-Token 优先（阿里云协议惯例）。
+    """
     _ = task_id
-    token = extract_header_token(request)
-    return _validate_resolved_token(token, "缺少X-NLS-Token头部")
+    token = extract_header_token(request) or extract_bearer_token(request)
+    return _validate_resolved_token(token, "缺少X-NLS-Token或Authorization Bearer头部")
 
 
 def validate_openai_token(request: Request, task_id: str = "") -> tuple[bool, str]:
