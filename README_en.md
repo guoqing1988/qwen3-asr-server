@@ -15,45 +15,16 @@ Speech recognition API service centered on [Qwen3-ASR](https://github.com/QwenLM
 
 </div>
 
-## Live Demo Site
-
-- **Web Demo**: https://asr.vect.one
-
-## Demo
-
-[![Demo](./demo/demo.png)](https://media.cdn.vect.one/qwenasr_client_demo.mp4)
-
-## Contact Author
-
-- **Email**: [pengzhia@gmail.com](mailto:pengzhia@gmail.com)
-- **WeChat**:
-
-<img src="./demo/contact.jpg" alt="WeChat QR code" width="220">
-
-## Release 1.0.3
-
-> `v1.0.3` removes the voiceprint database and sqlite-vec dependency, unifies
-> offline deployment under `HF_HUB_OFFLINE`, and reduces the default deployment
-> configuration to the settings in `.env.example`.
->
-> `v1.0.0` introduced a large breaking refactor relative to the earlier `main` branch.
-> If you are upgrading from `main`, read the release notes before reusing old deployment assumptions.
->
-> Key breaking changes:
-> - Python dependency management is now `uv`-based (`pyproject.toml` + `uv.lock`); `requirements*.txt` are gone
-> - Runtime stack changed to `CUDA -> official vLLM`, `CPU/macOS -> vendored QwenASR Rust`
-> - `MLX` / Apple Silicon GPU path has been removed; `mps` is normalized to `cpu`
-> - macOS / Apple Silicon now defaults to `qwen3-asr-0.6b`; set `QWEN3_ASR_MODEL` to override it
-> - `ENABLED_MODELS` has been removed
-> - Voiceprint APIs and persistent speaker identity matching have been removed
->
 ## Features
 
 - **Hybrid Runtime Stack** - Uses auto-selected Qwen3-ASR for offline inference and Paraformer realtime for websocket streaming
+- **Multilingual Recognition** - Qwen3-ASR supports 52 languages and dialects with automatic detection (zh/en/ja/ko/...)
 - **Speaker Diarization** - Automatic multi-speaker identification using CAM++ model
+- **Voiceprint Registration & Naming** - Register voiceprint samples per speaker; matched `speaker_id` values are replaced with display names
 - **OpenAI API Compatible** - Supports `/v1/audio/transcriptions` endpoint, works with OpenAI SDK
 - **Alibaba Cloud API Compatible** - Supports Alibaba Cloud Speech RESTful API and WebSocket streaming protocol
-- **WebSocket Streaming** - Real-time streaming speech recognition with low latency
+- **WebSocket Real-time Streaming** - True streaming recognition with incremental partial results
+- **GPU Memory Control** - Configurable vLLM memory utilization; idle timeout auto-unloads engines and lazy-reloads on demand
 - **Smart Far-Field Filtering** - Automatically filters far-field sounds and ambient noise in streaming ASR
 - **Intelligent Audio Segmentation** - VAD-based greedy merge algorithm for automatic long audio splitting
 - **GPU Batch Processing** - Batch inference support, 2-3x faster than sequential processing
@@ -63,6 +34,7 @@ Speech recognition API service centered on [Qwen3-ASR](https://github.com/QwenLM
 
 - [Qwen3-ASR](https://github.com/QwenLM/Qwen3-ASR) provides the official model family and multimodal/vLLM usage guidance
 - [QwenASR](https://github.com/huanglizhuo/QwenASR) provides the CPU Rust backend vendored by this project
+- [Qwen3-ASR Server](https://github.com/Quantatirsk/qwen3-asr) upstream reference implementation of this project
 
 ## Quick Deployment
 

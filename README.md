@@ -15,44 +15,16 @@
 
 </div>
 
-## 在线演示站点
-
-- **在线体验**: https://asr.vect.one
-
-## 演示
-
-[![演示](./demo/demo.png)](https://media.cdn.vect.one/qwenasr_client_demo.mp4)
-
-## 联系作者
-
-- **邮箱**: [pengzhia@gmail.com](mailto:pengzhia@gmail.com)
-- **微信**:
-
-<img src="./demo/contact.jpg" alt="微信二维码" width="220">
-
-## Release 1.0.3
-
-> `v1.0.3` 移除了声纹数据库和 sqlite-vec 依赖，离线部署统一使用
-> `HF_HUB_OFFLINE`，默认部署配置收敛为 `.env.example` 中的少数参数。
->
-> `v1.0.0` 相对于早期 `main` 分支引入了一轮大规模 breaking refactor。
-> 如果你是从 `main` 升级过来，请先阅读 release 说明，再决定是否沿用旧的部署与运行时假设。
->
-> 关键 breaking changes：
-> - Python 依赖管理已经切到 `uv`（`pyproject.toml` + `uv.lock`），`requirements*.txt` 已移除
-> - 运行时栈改成 `CUDA -> official vLLM`、`CPU/macOS -> vendored QwenASR Rust`
-> - `MLX` / Apple Silicon GPU 路径已移除，`mps` 会归一化到 `cpu`
-> - macOS / Apple Silicon 现在默认总是 `qwen3-asr-0.6b`，可通过 `QWEN3_ASR_MODEL` 覆盖
-> - `ENABLED_MODELS` 已移除
-> - 声纹 API 和持久化说话人身份匹配已移除
->
 ## 主要特性
 
 - **混合运行时栈** - 离线推理由自动选择的 Qwen3-ASR 提供，WebSocket 流式由 Paraformer realtime 能力提供
+- **多语言识别** - Qwen3-ASR 支持 52 种语言与方言，中英日韩等自动检测
 - **说话人分离** - 基于 CAM++ 模型自动识别多说话人，返回说话人标记
+- **声纹注册与说话人命名** - 为说话人注册声纹样本后，转写结果的 `speaker_id` 自动替换为显示名
 - **OpenAI API 兼容** - 支持 `/v1/audio/transcriptions` 端点，可直接使用 OpenAI SDK
 - **阿里云 API 兼容** - 支持阿里云语音识别 RESTful API 和 WebSocket 流式协议
-- **WebSocket 流式识别** - 支持实时流式语音识别，低延迟
+- **WebSocket 实时流式** - 边说边出字的实时语音识别，支持增量 partial 结果
+- **GPU 显存控制** - 可调 vLLM 显存利用率；空闲超时自动卸载释放显存，请求时懒加载恢复
 - **智能远场过滤** - 流式 ASR 自动过滤远场声音和环境音，减少误触发
 - **智能音频分段** - 基于 VAD 的贪婪合并算法，自动切分长音频，避免包含过长静音
 - **GPU 批处理加速** - 支持批量推理，比逐个处理快 2-3 倍
@@ -62,6 +34,7 @@
 
 - [Qwen3-ASR](https://github.com/QwenLM/Qwen3-ASR) 提供官方模型与多模态 / vLLM 使用方式
 - [QwenASR](https://github.com/huanglizhuo/QwenASR) 提供本项目 vendored 的 CPU Rust backend
+- [Qwen3-ASR Server](https://github.com/Quantatirsk/qwen3-asr) 本项目的上游参考实现
 
 ## 快速部署
 
