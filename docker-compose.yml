@@ -3,7 +3,7 @@ services:
     image: quantatrisk/qwen3-asr:gpu-latest
     container_name: qwen3-asr
     ports:
-      - "${NGINX_PORT:-17003}:8000"
+      - "${NGINX_PORT:-9101}:8000"
     volumes:
       - ./app:/app/app
       - ./temp:/app/temp

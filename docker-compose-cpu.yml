@@ -3,7 +3,7 @@ services:
     image: quantatrisk/qwen3-asr:cpu-latest
     container_name: qwen3-asr-cpu
     ports:
-      - "${NGINX_PORT:-17003}:8000"
+      - "${NGINX_PORT:-9101}:8000"
     volumes:
       - ./temp:/app/temp
       - ./logs:/app/logs

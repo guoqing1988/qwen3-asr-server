@@ -84,8 +84,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 docker-compose up -d
 ```
 
 Service URLs:
-- **API Endpoint**: `http://localhost:17003`
-- **API Docs**: `http://localhost:17003/docs`
+- **API Endpoint**: `http://localhost:9101`
+- **API Docs**: `http://localhost:9101/docs`
 
 **docker run (alternative):**
 
@@ -93,7 +93,7 @@ Service URLs:
 # GPU version
 docker run -d --name qwen3-asr \
   --gpus all \
-  -p 17003:8000 \
+  -p 9101:8000 \
   -e CUDA_VISIBLE_DEVICES=0,1,2,3 \
   -e API_KEY=your_api_key \
   -v ./models/modelscope:/root/.cache/modelscope \
@@ -103,7 +103,7 @@ docker run -d --name qwen3-asr \
 
 # CPU version
 docker run -d --name qwen3-asr \
-  -p 17003:8000 \
+  -p 9101:8000 \
   -v ./models/modelscope:/root/.cache/modelscope \
   -v ./models/huggingface:/root/.cache/huggingface \
   -v ./data:/app/data \
@@ -410,7 +410,7 @@ Settings in `.env.example`:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `NGINX_PORT` | `17003` | Host port exposed by Docker Compose |
+| `NGINX_PORT` | `9101` | Host port exposed by Docker Compose |
 | `API_KEY` | - | API authentication key (optional, unauthenticated if not set) |
 | `CUDA_VISIBLE_DEVICES` | `0` | Visible GPU list; one backend instance is started per visible GPU |
 | `QWEN3_ASR_MODEL` | auto | Force `qwen3-asr-1.7b` or `qwen3-asr-0.6b` instead of VRAM-based selection |

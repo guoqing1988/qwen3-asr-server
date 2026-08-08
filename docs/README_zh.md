@@ -81,8 +81,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 docker-compose up -d
 ```
 
 服务访问地址：
-- **API 端点**: `http://localhost:17003`
-- **API 文档**: `http://localhost:17003/docs`
+- **API 端点**: `http://localhost:9101`
+- **API 文档**: `http://localhost:9101/docs`
 
 **docker run 方式（替代）:**
 
@@ -90,7 +90,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 docker-compose up -d
 # GPU 版本
 docker run -d --name qwen3-asr \
   --gpus all \
-  -p 17003:8000 \
+  -p 9101:8000 \
   -e CUDA_VISIBLE_DEVICES=0,1,2,3 \
   -e API_KEY=your_api_key \
   -v ./models/modelscope:/root/.cache/modelscope \
@@ -100,7 +100,7 @@ docker run -d --name qwen3-asr \
 
 # CPU 版本
 docker run -d --name qwen3-asr \
-  -p 17003:8000 \
+  -p 9101:8000 \
   -v ./models/modelscope:/root/.cache/modelscope \
   -v ./models/huggingface:/root/.cache/huggingface \
   -v ./data:/app/data \
@@ -408,7 +408,7 @@ curl -X POST "http://localhost:8000/stream/v1/asr?enable_speaker_diarization=tru
 
 | 变量                               | 默认值       | 说明                                            |
 | ---------------------------------- | ------------ | ----------------------------------------------- |
-| `NGINX_PORT`                    | `17003`     | Docker Compose 映射到宿主机的端口             |
+| `NGINX_PORT`                    | `9101`     | Docker Compose 映射到宿主机的端口             |
 | `API_KEY`                       | -           | API 认证密钥（可选，未配置时无需认证）        |
 | `CUDA_VISIBLE_DEVICES`          | `0`         | GPU Compose 可见设备列表，多卡用 `0,1,2,3`   |
 | `QWEN3_ASR_MODEL`               | 自动选择     | 强制选择 `qwen3-asr-1.7b` 或 `qwen3-asr-0.6b` |
