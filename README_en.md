@@ -46,13 +46,13 @@ cp .env.example .env
 # Edit .env to set API_KEY (optional)
 
 # Start service (GPU version)
-docker-compose up -d
+docker compose up -d
 
 # Or CPU version
-docker-compose -f docker-compose-cpu.yml up -d
+docker compose -f docker-compose-cpu.yml up -d
 
 # Multi-GPU auto mode (one instance per visible GPU)
-CUDA_VISIBLE_DEVICES=0,1,2,3 docker-compose up -d
+CUDA_VISIBLE_DEVICES=0,1,2,3 docker compose up -d
 ```
 
 Service URLs:
@@ -122,7 +122,7 @@ scp qwen3-asr-models-*.tar.gz user@server:/opt/qwen3-asr/
 
 # 3. On offline server, extract and start
 tar -xzvf qwen3-asr-models-*.tar.gz
-docker-compose up -d
+docker compose up -d
 ```
 
 > Detailed deployment instructions: [Deployment Guide](./docs/deployment.md)
@@ -235,7 +235,7 @@ Notes:
 # Using OpenAI SDK
 from openai import OpenAI
 
-client = OpenAI(base_url="http://localhost:8000/v1", api_key="your_api_key")
+client = OpenAI(base_url="http://localhost:9101/v1", api_key="your_api_key")
 
 with open("audio.wav", "rb") as f:
     transcript = client.audio.transcriptions.create(
@@ -247,7 +247,7 @@ print(transcript.text)
 
 ```bash
 # Using curl
-curl -X POST "http://localhost:8000/v1/audio/transcriptions" \
+curl -X POST "http://localhost:9101/v1/audio/transcriptions" \
   -H "Authorization: Bearer your_api_key" \
   -F "file=@audio.wav" \
   -F "model=qwen3-asr-0.6b" \
@@ -282,12 +282,12 @@ curl -X POST "http://localhost:8000/v1/audio/transcriptions" \
 
 ```bash
 # Basic usage
-curl -X POST "http://localhost:8000/stream/v1/asr" \
+curl -X POST "http://localhost:9101/stream/v1/asr" \
   -H "Content-Type: application/octet-stream" \
   --data-binary @audio.wav
 
 # With parameters
-curl -X POST "http://localhost:8000/stream/v1/asr?enable_speaker_diarization=true" \
+curl -X POST "http://localhost:9101/stream/v1/asr?enable_speaker_diarization=true" \
   -H "Content-Type: application/octet-stream" \
   --data-binary @audio.wav
 ```
@@ -378,7 +378,7 @@ import asyncio, json, websockets
 
 async def main():
     async with websockets.connect(
-        "ws://localhost:8000/ws/v1/asr/qwen?token=YOUR_API_KEY"
+        "ws://localhost:9101/ws/v1/asr/qwen?token=YOUR_API_KEY"
     ) as ws:
         await ws.send(json.dumps({"type": "start", "payload": {"format": "pcm"}}))
         with open("audio.wav", "rb") as f:
@@ -561,7 +561,7 @@ keep the local diarization label (`说话人1`, `Speaker1`, ...).
 Create a speaker with one or more voiceprint samples:
 
 ```bash
-curl -X POST 'http://localhost:8000/api/v1/voiceprint-speakers' \
+curl -X POST 'http://localhost:9101/api/v1/voiceprint-speakers' \
   -F 'display_name=Alice' \
   -F 'file=@speaker_reference.wav'
 ```
@@ -569,20 +569,20 @@ curl -X POST 'http://localhost:8000/api/v1/voiceprint-speakers' \
 Add more samples to an existing speaker:
 
 ```bash
-curl -X POST 'http://localhost:8000/api/v1/voiceprint-speakers/{speaker_id}/samples' \
+curl -X POST 'http://localhost:9101/api/v1/voiceprint-speakers/{speaker_id}/samples' \
   -F 'file=@another_reference.wav'
 ```
 
 List registered speakers:
 
 ```bash
-curl 'http://localhost:8000/api/v1/voiceprint-speakers'
+curl 'http://localhost:9101/api/v1/voiceprint-speakers'
 ```
 
 Soft-delete a speaker:
 
 ```bash
-curl -X DELETE 'http://localhost:8000/api/v1/voiceprint-speakers/{speaker_id}'
+curl -X DELETE 'http://localhost:9101/api/v1/voiceprint-speakers/{speaker_id}'
 ```
 
 The voiceprint database is persisted under `./data/voiceprints.sqlite3` (mounted
@@ -636,8 +636,8 @@ fully idle. Set `QWEN_IDLE_UNLOAD_TIMEOUT=0` to keep models resident permanently
 
 After starting the service:
 
-- Swagger UI: `http://localhost:8000/docs`
-- ReDoc: `http://localhost:8000/redoc`
+- Swagger UI: `http://localhost:9101/docs`
+- ReDoc: `http://localhost:9101/redoc`
 
 ## Links
 

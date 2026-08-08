@@ -103,7 +103,7 @@ Scores are internal diagnostics only and are not returned to ASR callers.
 Create a speaker and register one or more single-speaker samples:
 
 ```bash
-curl -X POST 'http://localhost:8000/api/v1/voiceprint-speakers' \
+curl -X POST 'http://localhost:9101/api/v1/voiceprint-speakers' \
   -F 'display_name=Alice' \
   -F 'file=@tests/files/voiceprint_samples/dialogue_speaker_01_reference.wav'
 ```
@@ -111,20 +111,20 @@ curl -X POST 'http://localhost:8000/api/v1/voiceprint-speakers' \
 Add samples to an existing speaker:
 
 ```bash
-curl -X POST 'http://localhost:8000/api/v1/voiceprint-speakers/{speaker_id}/samples' \
+curl -X POST 'http://localhost:9101/api/v1/voiceprint-speakers/{speaker_id}/samples' \
   -F 'file=@tests/files/voiceprint_samples/dialogue_speaker_02_reference.wav'
 ```
 
 List speakers:
 
 ```bash
-curl 'http://localhost:8000/api/v1/voiceprint-speakers'
+curl 'http://localhost:9101/api/v1/voiceprint-speakers'
 ```
 
 Soft-delete a speaker:
 
 ```bash
-curl -X DELETE 'http://localhost:8000/api/v1/voiceprint-speakers/{speaker_id}'
+curl -X DELETE 'http://localhost:9101/api/v1/voiceprint-speakers/{speaker_id}'
 ```
 
 ## Failure Behavior

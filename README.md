@@ -46,13 +46,13 @@ cp .env.example .env
 # 编辑 .env 设置 API_KEY（可选）
 
 # 启动服务（GPU 版本）
-docker-compose up -d
+docker compose up -d
 
 # 或 CPU 版本
-docker-compose -f docker-compose-cpu.yml up -d
+docker compose -f docker-compose-cpu.yml up -d
 
 # 多卡自动模式（每张可见卡自动拉起 1 个实例）
-CUDA_VISIBLE_DEVICES=0,1,2,3 docker-compose up -d
+CUDA_VISIBLE_DEVICES=0,1,2,3 docker compose up -d
 ```
 
 服务访问地址：
@@ -122,7 +122,7 @@ scp qwen3-asr-models-*.tar.gz user@server:/opt/qwen3-asr/
 
 # 3. 在内网服务器解压并启动
 tar -xzvf qwen3-asr-models-*.tar.gz
-docker-compose up -d
+docker compose up -d
 ```
 
 > 详细部署说明请查看 [部署指南](./docs/deployment.md)
@@ -235,7 +235,7 @@ python start.py
 # 使用 OpenAI SDK
 from openai import OpenAI
 
-client = OpenAI(base_url="http://localhost:8000/v1", api_key="your_api_key")
+client = OpenAI(base_url="http://localhost:9101/v1", api_key="your_api_key")
 
 with open("audio.wav", "rb") as f:
     transcript = client.audio.transcriptions.create(
@@ -247,7 +247,7 @@ print(transcript.text)
 
 ```bash
 # 使用 curl
-curl -X POST "http://localhost:8000/v1/audio/transcriptions" \
+curl -X POST "http://localhost:9101/v1/audio/transcriptions" \
   -H "Authorization: Bearer your_api_key" \
   -F "file=@audio.wav" \
   -F "model=qwen3-asr-0.6b" \
@@ -282,12 +282,12 @@ curl -X POST "http://localhost:8000/v1/audio/transcriptions" \
 
 ```bash
 # 基本用法
-curl -X POST "http://localhost:8000/stream/v1/asr" \
+curl -X POST "http://localhost:9101/stream/v1/asr" \
   -H "Content-Type: application/octet-stream" \
   --data-binary @audio.wav
 
 # 带参数
-curl -X POST "http://localhost:8000/stream/v1/asr?enable_speaker_diarization=true" \
+curl -X POST "http://localhost:9101/stream/v1/asr?enable_speaker_diarization=true" \
   -H "Content-Type: application/octet-stream" \
   --data-binary @audio.wav
 ```
@@ -374,7 +374,7 @@ import asyncio, json, websockets
 
 async def main():
     async with websockets.connect(
-        "ws://localhost:8000/ws/v1/asr/qwen?token=YOUR_API_KEY"
+        "ws://localhost:9101/ws/v1/asr/qwen?token=YOUR_API_KEY"
     ) as ws:
         await ws.send(json.dumps({"type": "start", "payload": {"format": "pcm"}}))
         with open("audio.wav", "rb") as f:
@@ -547,7 +547,7 @@ FunASR 兼容的 WebSocket 端点。
 创建说话人并注册一个或多个声纹样本：
 
 ```bash
-curl -X POST 'http://localhost:8000/api/v1/voiceprint-speakers' \
+curl -X POST 'http://localhost:9101/api/v1/voiceprint-speakers' \
   -F 'display_name=Alice' \
   -F 'file=@speaker_reference.wav'
 ```
@@ -555,20 +555,20 @@ curl -X POST 'http://localhost:8000/api/v1/voiceprint-speakers' \
 给已有说话人追加样本：
 
 ```bash
-curl -X POST 'http://localhost:8000/api/v1/voiceprint-speakers/{speaker_id}/samples' \
+curl -X POST 'http://localhost:9101/api/v1/voiceprint-speakers/{speaker_id}/samples' \
   -F 'file=@another_reference.wav'
 ```
 
 查看已注册说话人：
 
 ```bash
-curl 'http://localhost:8000/api/v1/voiceprint-speakers'
+curl 'http://localhost:9101/api/v1/voiceprint-speakers'
 ```
 
 软删除说话人：
 
 ```bash
-curl -X DELETE 'http://localhost:8000/api/v1/voiceprint-speakers/{speaker_id}'
+curl -X DELETE 'http://localhost:9101/api/v1/voiceprint-speakers/{speaker_id}'
 ```
 
 声纹数据库持久化在 `./data/voiceprints.sqlite3`（Docker Compose 已挂载 `./data`）。
@@ -610,8 +610,8 @@ QWEN_FORCE_ALIGNER_GPU_MEMORY_UTILIZATION=0.15
 
 启动服务后访问：
 
-- Swagger UI: `http://localhost:8000/docs`
-- ReDoc: `http://localhost:8000/redoc`
+- Swagger UI: `http://localhost:9101/docs`
+- ReDoc: `http://localhost:9101/redoc`
 
 ## 相关链接
 

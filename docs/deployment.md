@@ -32,8 +32,8 @@ docker run -d --name qwen3-asr \
   -v ./temp:/app/temp \
   quantatrisk/qwen3-asr:gpu-latest
 
-# 或使用 docker-compose（推荐）
-docker-compose up -d
+# 或使用 docker compose（推荐）
+docker compose up -d
 ```
 
 ### 多 GPU 自动并行部署（推荐）
@@ -41,13 +41,13 @@ docker-compose up -d
 适用于并发量较高场景。该方案通过容器 entrypoint 自动完成：
 - 根据 `CUDA_VISIBLE_DEVICES` 拉起多个 ASR 实例（每张卡 1 个实例）
 - 容器内自动生成 Nginx upstream 并负载均衡到各实例
-- 对外仍只暴露一个服务端口（默认 `8000`）
+- 对外仍只暴露一个服务端口（默认 `9101`，由 NGINX_PORT 控制）
 
-你不需要手工维护多个 `docker-compose` 服务块或手工维护 nginx upstream。
+你不需要手工维护多个 `docker compose` 服务块或手工维护 nginx upstream。
 
 ```bash
 # 4 卡示例：GPU0,1,2,3 各启动 1 个实例
-CUDA_VISIBLE_DEVICES=0,1,2,3 docker-compose up -d
+CUDA_VISIBLE_DEVICES=0,1,2,3 docker compose up -d
 ```
 
 常用组合：
@@ -483,5 +483,5 @@ docker pull quantatrisk/qwen3-asr:gpu-latest
 docker pull quantatrisk/qwen3-asr:cpu-latest
 
 # 重启服务
-docker-compose down && docker-compose up -d
+docker compose down && docker compose up -d
 ```
