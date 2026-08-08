@@ -1,5 +1,3 @@
-name: qwen3-asr
-
 services:
   qwen3-asr:
     image: quantatrisk/qwen3-asr:gpu-latest
@@ -7,6 +5,7 @@ services:
     ports:
       - "${NGINX_PORT:-17003}:8000"
     volumes:
+      - ./app:/app/app
       - ./temp:/app/temp
       - ./logs:/app/logs
       - ./data:/app/data
@@ -19,4 +18,7 @@ services:
       HF_ENDPOINT: ${HF_ENDPOINT:-}
       QWEN3_ASR_MODEL: ${QWEN3_ASR_MODEL:-}
       CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-0}
+      QWEN_GPU_MEMORY_UTILIZATION: ${QWEN_GPU_MEMORY_UTILIZATION:-}
+      QWEN_FORCE_ALIGNER_GPU_MEMORY_UTILIZATION: ${QWEN_FORCE_ALIGNER_GPU_MEMORY_UTILIZATION:-}
+      QWEN_IDLE_UNLOAD_TIMEOUT: ${QWEN_IDLE_UNLOAD_TIMEOUT:-300}
     restart: unless-stopped

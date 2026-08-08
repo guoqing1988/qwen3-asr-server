@@ -414,6 +414,22 @@ curl -X POST "http://localhost:8000/stream/v1/asr?enable_speaker_diarization=tru
 | `QWEN3_ASR_MODEL`               | 自动选择     | 强制选择 `qwen3-asr-1.7b` 或 `qwen3-asr-0.6b` |
 | `HF_HUB_OFFLINE`                | `0`         | 离线部署且模型已准备好时设为 `1`              |
 | `HF_ENDPOINT`                   | -           | 在线镜像站；离线部署不要设置                  |
+| `QWEN_GPU_MEMORY_UTILIZATION`   | 自动计算     | 主 ASR 模型的 vLLM 显存利用率（0.0-1.0）。默认按 `12GB / 总显存` 自动计算；调低可减少常驻显存 |
+| `QWEN_FORCE_ALIGNER_GPU_MEMORY_UTILIZATION` | 继承主模型 | forced aligner（词级时间戳）vLLM 实例的显存利用率（0.0-1.0） |
+| `QWEN_IDLE_UNLOAD_TIMEOUT`      | `300`       | 无请求超过该秒数后卸载 vLLM 引擎释放显存；`0` 禁用空闲卸载 |
+
+### 显存控制与空闲卸载
+
+CUDA vLLM 运行时按显存利用率比例预分配显存（默认 `12GB / 总显存`，上限 0.95）。在 48GB 显卡上，主引擎约预留 12GB，forced aligner 还会再预留一份。要降低常驻显存，可在 `.env` 中调低比例：
+
+```dotenv
+QWEN_GPU_MEMORY_UTILIZATION=0.20
+QWEN_FORCE_ALIGNER_GPU_MEMORY_UTILIZATION=0.15
+```
+
+**空闲卸载**：设置 `QWEN_IDLE_UNLOAD_TIMEOUT`（默认 `300` 秒）后，后台监控会在连续无请求超过该时长时卸载 vLLM 引擎（主模型 + forced aligner），终止其 EngineCore 子进程并将显存归还系统。下一次请求会自动触发懒加载重建，约需 30-60 秒。正在执行或排队等待引擎的请求不会被中途卸载，监控仅在引擎完全空闲时触发。设置 `QWEN_IDLE_UNLOAD_TIMEOUT=0` 可让模型常驻不卸载。
+
+> **注意**：显存利用率调得过低会导致 vLLM 启动失败（例如 48GB 卡上主引擎低于约 0.16、aligner 低于约 0.12 时，扣除权重后无剩余空间分配 KV cache）。
 
 ## API 文档
 

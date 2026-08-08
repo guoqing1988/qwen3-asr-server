@@ -416,6 +416,33 @@ Settings in `.env.example`:
 | `QWEN3_ASR_MODEL` | auto | Force `qwen3-asr-1.7b` or `qwen3-asr-0.6b` instead of VRAM-based selection |
 | `HF_HUB_OFFLINE` | unset | Set to `1` only after preparing `./models` for offline deployment |
 | `HF_ENDPOINT` | unset | Online Hugging Face mirror endpoint, for example `https://hf-mirror.com` |
+| `QWEN_GPU_MEMORY_UTILIZATION` | auto | vLLM GPU memory utilization (0.0-1.0) for the main ASR model. Default is auto-calculated as `12GB / total VRAM`; lower it to reduce resident VRAM |
+| `QWEN_FORCE_ALIGNER_GPU_MEMORY_UTILIZATION` | inherits | GPU memory utilization for the forced aligner vLLM instance (0.0-1.0) |
+| `QWEN_IDLE_UNLOAD_TIMEOUT` | `300` | Unload vLLM engines to release VRAM after this many seconds without requests; `0` disables idle unload |
+
+### GPU Memory Control and Idle Unload
+
+The CUDA vLLM runtime pre-allocates GPU memory according to the memory utilization
+ratio (default: `12GB / total VRAM`, capped at 0.95). On a 48GB GPU this reserves
+about 12GB for the main engine plus another reservation for the forced aligner.
+To reduce resident VRAM, lower the ratios in `.env`:
+
+```dotenv
+QWEN_GPU_MEMORY_UTILIZATION=0.20
+QWEN_FORCE_ALIGNER_GPU_MEMORY_UTILIZATION=0.15
+```
+
+Note: going too low fails startup — on a 48GB GPU the main engine needs at least
+~0.16 and the forced aligner ~0.12 (vLLM 0.19 also profiles CUDA graph memory),
+otherwise there is no room left for the KV cache.
+
+**Idle unload**: with `QWEN_IDLE_UNLOAD_TIMEOUT` set (default `300` seconds), a
+background monitor unloads the vLLM engines (main model + forced aligner) after the
+configured time without any request, terminating their EngineCore processes so the
+GPU memory is returned to the system. The next request triggers an automatic lazy
+reload, which takes roughly 30-60 seconds. Requests that are running or waiting on
+the engine are never unloaded mid-flight; the monitor only fires when the engine is
+fully idle. Set `QWEN_IDLE_UNLOAD_TIMEOUT=0` to keep models resident permanently.
 
 ## API Documentation
 

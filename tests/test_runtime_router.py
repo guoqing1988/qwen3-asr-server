@@ -40,10 +40,11 @@ class RuntimeRouterTest(unittest.IsolatedAsyncioTestCase):
         router = RuntimeRouter()
         semaphore = asyncio.Semaphore(8)
         router._resolve_family = lambda _model_id: RuntimeFamily.QWEN_VLLM  # type: ignore[method-assign]
-        router._get_shared_engine = lambda _family, _model_id: (  # type: ignore[method-assign]
-            engine,
-            semaphore,
-        )
+
+        async def _ensure_loaded(_family, _model_id):
+            return engine, semaphore
+
+        router._ensure_shared_engine_loaded = _ensure_loaded  # type: ignore[method-assign]
 
         requests = [
             OfflineASRRequest(

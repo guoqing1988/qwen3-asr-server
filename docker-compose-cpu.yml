@@ -1,5 +1,3 @@
-name: qwen3-asr
-
 services:
   qwen3-asr:
     image: quantatrisk/qwen3-asr:cpu-latest
