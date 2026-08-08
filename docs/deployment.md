@@ -24,7 +24,7 @@
 # 使用 docker run（带模型挂载）
 docker run -d --name qwen3-asr \
   --gpus all \
-  -p 17003:8000 \
+  -p 9101:8000 \
   -v ./models/modelscope:/root/.cache/modelscope \
   -v ./models/huggingface:/root/.cache/huggingface \
   -v ./data:/app/data \
@@ -56,8 +56,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 docker-compose up -d
 - 四卡：`CUDA_VISIBLE_DEVICES=0,1,2,3`
 
 **服务访问地址：**
-- API 服务: `http://localhost:17003`
-- API 文档: `http://localhost:17003/docs`
+- API 服务: `http://localhost:9101`
+- API 文档: `http://localhost:9101/docs`
 
 ### CPU 版本部署
 
@@ -65,7 +65,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 docker-compose up -d
 
 ```bash
 docker run -d --name qwen3-asr \
-  -p 17003:8000 \
+  -p 9101:8000 \
   -v ./models/modelscope:/root/.cache/modelscope \
   -v ./models/huggingface:/root/.cache/huggingface \
   -v ./data:/app/data \
@@ -92,18 +92,18 @@ python start.py
 
 ```bash
 # 健康检查
-curl http://localhost:17003/stream/v1/asr/health
+curl http://localhost:9101/stream/v1/asr/health
 
 # 查看可用模型
-curl http://localhost:17003/stream/v1/asr/models
+curl http://localhost:9101/stream/v1/asr/models
 
 # 测试语音识别（阿里云协议）
-curl -X POST "http://localhost:17003/stream/v1/asr" \
+curl -X POST "http://localhost:9101/stream/v1/asr" \
   -H "Content-Type: application/octet-stream" \
   --data-binary @test.wav
 
 # 测试 OpenAI 兼容接口
-curl -X POST "http://localhost:17003/v1/audio/transcriptions" \
+curl -X POST "http://localhost:9101/v1/audio/transcriptions" \
   -H "Authorization: Bearer any" \
   -F "file=@test.wav" \
   -F "model=qwen3-asr-1.7b"
@@ -230,7 +230,7 @@ Compose 文件是运行时配置的唯一来源；其余调优参数保留代码
 ### 健康检查
 
 ```bash
-curl http://localhost:17003/stream/v1/asr/health
+curl http://localhost:9101/stream/v1/asr/health
 ```
 
 ### 日志监控
@@ -251,6 +251,94 @@ docker stats qwen3-asr
 
 # GPU 使用情况
 docker exec -it qwen3-asr nvidia-smi
+```
+
+## Docker 常用命令
+
+> 以下命令使用 Compose v2 写法（`docker compose`）。若本机只安装了旧版
+> `docker-compose`（v1），把 `docker compose` 替换为 `docker-compose` 即可，
+> 两者功能等价。
+
+### 服务生命周期
+
+```bash
+# 启动服务（后台运行；已存在且配置未变的容器会直接复用）
+docker compose up -d
+
+# 配置变更后强制重建（改端口/环境变量/挂载/镜像时必须用）
+docker compose up -d --force-recreate
+
+# 停止容器进程（保留容器，下次 start 秒级恢复；仅适用于配置未变的场景）
+docker compose stop
+docker compose start
+
+# 重启容器进程
+docker compose restart
+
+# 停止并删除容器与默认网络（数据卷与挂载目录保留）
+docker compose down
+
+# 停止并删除容器、网络、匿名卷（慎用，会丢容器内未挂载的数据）
+docker compose down -v
+```
+
+**区分两个概念**：`stop/start` 只是重启**同一个容器**，创建时固化的端口、
+环境变量、挂载定义都不会更新；`up --force-recreate` 会**销毁旧容器并按最新
+配置重建**。改了 `docker-compose.yml` 或 `.env` 中的端口、环境变量、volumes
+等容器级配置后，必须用 `--force-recreate`（或 `down` + `up -d`）才能生效。
+
+### 状态与日志
+
+```bash
+# 查看容器状态与端口映射
+docker compose ps
+
+# 实时查看日志
+docker compose logs -f qwen3-asr
+
+# 查看最近 N 行日志
+docker compose logs --tail 100 qwen3-asr
+
+# 查看错误日志
+docker compose logs qwen3-asr 2>&1 | grep -i error
+```
+
+### 容器内操作
+
+```bash
+# 进入容器终端
+docker compose exec -T qwen3-asr bash
+
+# 在容器内执行单条命令
+docker compose exec -T qwen3-asr nvidia-smi
+docker compose exec -T qwen3-asr printenv QWEN_GPU_MEMORY_UTILIZATION
+
+# 宿主机 <-> 容器复制文件
+docker compose cp qwen3-asr:/app/demo/demo.mp4 /tmp/demo.mp4
+docker compose cp ./data/file.wav qwen3-asr:/tmp/
+```
+
+### 镜像管理
+
+```bash
+# 查看本地镜像
+docker images
+
+# 删除不再使用的悬空镜像
+docker image prune
+
+# 删除指定镜像（先确认无容器使用）
+docker rmi quantatrisk/qwen3-asr:gpu-latest
+```
+
+### GPU 状态
+
+```bash
+# 宿主机查看 GPU 与显存占用（含各进程明细）
+nvidia-smi
+
+# 只看显存占用数值（脚本场景）
+nvidia-smi --query-gpu=memory.used --format=csv,noheader
 ```
 
 ## 资源需求
