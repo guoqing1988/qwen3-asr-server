@@ -88,6 +88,30 @@ async def create_voiceprint_speaker(
         description="One or more single-speaker reference audio files",
     ),
 ) -> JSONResponse:
+    """创建说话人并注册声纹样本。
+
+    注册后，ASR 转写结果中与该样本声纹匹配的分段，其 `speaker_id` 会
+    自动替换为该显示名；未注册或匹配不确定的说话人保留原始标签
+    （如 `说话人1`）。
+
+    参数（multipart/form-data）:
+    - `display_name`: 说话人显示名，将出现在 ASR 结果的 `speaker_id` 中
+    - `description`: 可选，说话人备注
+    - `file`: 一个或多个**单人**参考音频（wav/mp3/mp4 等，自动归一化到
+      16kHz）；建议每段 2 秒以上纯语音，多个样本可提升匹配准确率
+
+    鉴权: 需要 `X-NLS-Token` 请求头（未配置 API_KEY 时免鉴权）。
+    注意：本接口与 `/stream/*` 一致仅接受 `X-NLS-Token`，不接受
+    `Authorization: Bearer`（OpenAI 兼容的 `/v1/*` 接口才两者皆可）
+
+    示例:
+        curl -X POST 'http://localhost:9101/api/v1/voiceprint-speakers' \\
+          -H "X-NLS-Token: your_key" \\
+          -F 'display_name=张三' -F 'file=@sample.wav'
+
+    返回: `speaker_id`（后续追加样本/删除时使用）、`voiceprint_id(s)`、
+    `voiceprint_count`。鉴权失败返回 400（AUTHENTICATION_FAILED）。
+    """
     task_id = generate_task_id()
     prepared_audios: list[AudioProcessingResult] = []
 
@@ -154,6 +178,23 @@ async def add_voiceprint_speaker_samples(
         description="One or more single-speaker reference audio files",
     ),
 ) -> JSONResponse:
+    """为已有说话人追加声纹样本。
+
+    同一说话人注册的样本越多，匹配越稳定（内部分数按
+    `max_score * 0.7 + top3_mean_score * 0.3` 聚合）。
+
+    参数:
+    - `speaker_id`: 路径参数，创建说话人时返回的 ID
+    - `file`: 一个或多个**单人**参考音频，格式与创建接口相同
+
+    示例:
+        curl -X POST 'http://localhost:9101/api/v1/voiceprint-speakers/{speaker_id}/samples' \\
+          -H "X-NLS-Token: your_key" \\
+          -F 'file=@another_sample.wav'
+
+    返回: `speaker_id`、更新后的 `voiceprint_ids`、`voiceprint_count`。
+    说话人不存在时返回 400（INVALID_PARAMETER）。
+    """
     task_id = generate_task_id()
     prepared_audios: list[AudioProcessingResult] = []
 
@@ -204,6 +245,15 @@ async def add_voiceprint_speaker_samples(
     summary="List registered voiceprint speakers",
 )
 async def list_voiceprint_speakers(request: Request) -> JSONResponse:
+    """列出已注册的声纹说话人。
+
+    返回每个说话人的 `speaker_id`、`display_name`、`description` 和
+    `voiceprint_count`（已注册的声纹样本数）。已软删除的说话人不返回。
+
+    示例:
+        curl 'http://localhost:9101/api/v1/voiceprint-speakers' \\
+          -H "X-NLS-Token: your_key"
+    """
     task_id = generate_task_id()
     try:
         auth_ok, auth_content = validate_token(request, task_id)
@@ -252,6 +302,19 @@ async def delete_voiceprint_speaker(
     request: Request,
     speaker_id: str,
 ) -> JSONResponse:
+    """软删除声纹说话人。
+
+    删除后 ASR 结果不再使用该显示名替换 `speaker_id`，回退为原始说话人
+    标签。仅标记 `status='deleted'`，声纹向量保留在数据库中，可通过
+    重建数据库清理。
+
+    参数:
+    - `speaker_id`: 路径参数，要删除的说话人 ID
+
+    示例:
+        curl -X DELETE 'http://localhost:9101/api/v1/voiceprint-speakers/{speaker_id}' \\
+          -H "X-NLS-Token: your_key"
+    """
     task_id = generate_task_id()
     try:
         auth_ok, auth_content = validate_token(request, task_id)
