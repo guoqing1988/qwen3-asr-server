@@ -266,6 +266,26 @@ uv run python -m app.utils.download_models
 uv run python -m app.utils.download_models --export-dir ./models
 ```
 
+**模型目录结构**（两个渠道，全部在 `models/` 下，随 compose 挂载持久化）：
+
+```text
+models/
+├── huggingface/          # Qwen 系列（HuggingFace 渠道，约 6.2GB 总量）
+│   └── hub/models--Qwen--Qwen3-ASR-1.7B/           # 主模型 ~4.4GB
+│   └── hub/models--Qwen--Qwen3-ForcedAligner-0.6B/ # 词级时间戳对齐器 ~1.8GB
+└── modelscope/           # FunASR/CAM++/VAD 系列（ModelScope 渠道，约 2GB 总量）
+    └── hub/models/
+        ├── iic/speech_paraformer-large_...          # 中文实时流式 ~849MB
+        ├── iic/punc_ct-transformer_...（×2）        # 离线/实时标点
+        ├── iic/speech_campplus_speaker-diarization_common  # 说话人分离
+        ├── damo/speech_campplus_sv_...              # 声纹验证（声纹匹配）
+        ├── damo/speech_campplus-transformer_scl_... # 说话人聚类
+        └── damo/speech_fsmn_vad_...                 # VAD ~69MB
+```
+
+> 完整模型用途与使用场景见 README「模型清单」章节。离线部署时整体拷贝
+> `models/` 目录即可；`.gitignore` 已忽略 `models/`（模型不随代码库分发）。
+
 离线部署时，推荐目录结构：
 
 ```text

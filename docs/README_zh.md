@@ -489,6 +489,29 @@ asyncio.run(main())
 
 启动时会先检测当前运行计划所需模型；如果本地缓存缺失，会自动下载。离线部署可显式设置 `HF_HUB_OFFLINE=1` 并提前准备模型缓存。
 
+## 模型清单
+
+所有运行时模型缓存在项目 `models/` 目录下并挂载进容器，分为两个渠道：
+
+| 模型 | 大小 | 渠道与路径 | 用途 |
+|------|------|-----------|------|
+| Qwen3-ASR 1.7B | ~4.4GB | HF：`models/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B` | 离线转写、`/ws/v1/asr/qwen` 流式（多语言） |
+| Qwen3-ForcedAligner 0.6B | ~1.8GB | HF：`models/huggingface/hub/models--Qwen--Qwen3-ForcedAligner-0.6B` | 词级时间戳（离线 `word_timestamps=true`） |
+| Paraformer Large | ~849MB | MS：`models/modelscope/hub/models/iic/speech_paraformer-large_...` | `/ws/v1/asr` + `/ws/v1/asr/funasr`（中文实时流式） |
+| 标点（离线） | ~300MB | MS：`models/modelscope/hub/models/iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch` | 离线/流式标点 |
+| 标点（实时） | ~300MB | MS：`models/modelscope/hub/models/iic/punc_ct-transformer_..._vad_realtime-...` | FunASR 流式路径实时标点 |
+| CAM++ 说话人分离 | ~300MB | MS：`models/modelscope/hub/models/iic/speech_campplus_speaker-diarization_common` | 说话人分离（离线） |
+| CAM++ 声纹验证 | ~90MB | MS：`models/modelscope/hub/models/damo/speech_campplus_sv_zh-cn_16k-common` | 说话人聚类 + 声纹匹配 |
+| CAM++ SCL | ~90MB | MS：`models/modelscope/hub/models/damo/speech_campplus-transformer_scl_zh-cn_16k-common` | 说话人聚类 |
+| VAD（FSMN） | ~69MB | MS：`models/modelscope/hub/models/damo/speech_fsmn_vad_zh-cn-16k-common-pytorch` | 语音活动检测、音频切分 |
+
+**使用场景指引**：
+
+- **中文实时流式**（低延迟 + 实时标点）：FunASR 路径使用 Paraformer Large + 实时标点模型（ModelScope 渠道）
+- **多语言 / 离线 / 词级时间戳**：Qwen3-ASR 1.7B + ForcedAligner（HuggingFace 渠道）
+- **说话人分离与声纹**（仅离线接口）：CAM++ 系列模型（ModelScope 渠道）
+- **下载行为**：启动时自动补下缺失模型（ModelScope 模型走 `modelscope.cn`，Qwen 模型走 HuggingFace 或 `HF_ENDPOINT` 镜像）；完全离线部署先执行一次 `./scripts/prepare-models.sh` 并拷贝 `models/` 目录
+
 ## 声纹数据库
 
 支持持久化说话人身份匹配：为说话人注册声纹后，ASR 结果中匹配到的分段会把

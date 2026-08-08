@@ -496,6 +496,35 @@ Automatic long audio segmentation:
 
 At startup the service checks the current runtime model plan and downloads missing models by default. Set `HF_HUB_OFFLINE=1` only for strictly offline deployments with a prepared cache.
 
+## Model Inventory
+
+All runtime models are cached under the project `models/` directory and mounted
+into the container. Models are split across two channels:
+
+| Model | Size | Channel & Path | Used By |
+|-------|------|----------------|---------|
+| Qwen3-ASR 1.7B | ~4.4GB | HF: `models/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B` | Offline transcription, `/ws/v1/asr/qwen` streaming, voiceprint-independent ASR |
+| Qwen3-ForcedAligner 0.6B | ~1.8GB | HF: `models/huggingface/hub/models--Qwen--Qwen3-ForcedAligner-0.6B` | Word-level timestamps (`word_timestamps=true`, offline) |
+| Paraformer Large | ~849MB | MS: `models/modelscope/hub/models/iic/speech_paraformer-large_...` | `/ws/v1/asr` + `/ws/v1/asr/funasr` (Chinese realtime streaming) |
+| Punctuation (offline) | ~300MB | MS: `models/modelscope/hub/models/iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch` | Punctuation for offline/streaming ASR |
+| Punctuation (realtime) | ~300MB | MS: `models/modelscope/hub/models/iic/punc_ct-transformer_..._vad_realtime-...` | Realtime punctuation in the FunASR websocket path |
+| CAM++ diarization | ~300MB | MS: `models/modelscope/hub/models/iic/speech_campplus_speaker-diarization_common` | Speaker diarization (offline) |
+| CAM++ speaker verification | ~90MB | MS: `models/modelscope/hub/models/damo/speech_campplus_sv_zh-cn_16k-common` | Speaker clustering + voiceprint matching |
+| CAM++ SCL | ~90MB | MS: `models/modelscope/hub/models/damo/speech_campplus-transformer_scl_zh-cn_16k-common` | Speaker clustering |
+| VAD (FSMN) | ~69MB | MS: `models/modelscope/hub/models/damo/speech_fsmn_vad_zh-cn-16k-common-pytorch` | Voice activity detection for audio splitting |
+
+**Scenario guidance**:
+
+- **Chinese realtime streaming** (low latency, realtime punctuation): FunASR
+  path uses Paraformer Large + realtime punctuation (ModelScope).
+- **Multilingual / offline / word timestamps**: Qwen3-ASR 1.7B + ForcedAligner
+  (HuggingFace).
+- **Speaker diarization & voiceprints** (offline only): CAM++ models (ModelScope).
+- **Download behavior**: missing models are auto-downloaded at startup
+  (ModelScope models from `modelscope.cn`, Qwen models from HuggingFace, or the
+  `HF_ENDPOINT` mirror). For fully offline deployments run
+  `./scripts/prepare-models.sh` once and copy the `models/` directory.
+
 ## Voiceprint Database
 
 Persistent speaker identity matching: when a voiceprint is registered for a
