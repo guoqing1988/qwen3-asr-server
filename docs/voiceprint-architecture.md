@@ -98,6 +98,20 @@ unknown:
 
 Scores are internal diagnostics only and are not returned to ASR callers.
 
+### Speaker Assignment Uniqueness
+
+Each registered speaker can be assigned to at most **one** local diarization
+label within a single ASR request. When multiple local speakers (e.g. 说话人1
+and 说话人3) both match the same registered profile:
+
+1. The local speaker with the **highest** score wins the assignment.
+2. The remaining local speakers are demoted to `UNKNOWN` (their original
+   diarization label is preserved).
+3. A warning is logged with both scores for diagnostics.
+
+This prevents the same registered identity from "absorbing" multiple distinct
+local speakers when their voiceprints are similar.
+
 ## API
 
 Create a speaker and register one or more single-speaker samples:
