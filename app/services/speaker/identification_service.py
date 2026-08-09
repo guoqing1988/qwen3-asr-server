@@ -98,6 +98,9 @@ class SpeakerIdentificationService:
                 )
                 decisions[local_speaker_id] = match_decision
 
+            # 去重：同一注册说话人只能匹配一个本地说话人，冲突时保留最高分
+            decisions = self._deduplicate_decisions(decisions)
+
             for segment in asr_result.segments:
                 if not segment.speaker_id:
                     continue
@@ -224,6 +227,49 @@ class SpeakerIdentificationService:
     @staticmethod
     def _is_runtime_enabled() -> bool:
         return settings.VOICEPRINT_ENABLED
+
+    @staticmethod
+    def _deduplicate_decisions(
+        decisions: dict[str, SpeakerMatchDecision],
+    ) -> dict[str, SpeakerMatchDecision]:
+        """确保同一注册说话人只匹配一个本地说话人。
+
+        当多个本地说话人都匹配到同一注册声纹时，保留得分最高的，
+        其余降级为 UNKNOWN（保留原始 diarization 标签）。
+        """
+        matched = [
+            d for d in decisions.values()
+            if d.status == SpeakerMatchStatus.MATCHED
+        ]
+        if len(matched) <= 1:
+            return decisions
+
+        by_output: dict[str, list[SpeakerMatchDecision]] = {}
+        for d in matched:
+            by_output.setdefault(d.output_speaker_id, []).append(d)
+
+        updated = dict(decisions)
+        for output_id, conflicts in by_output.items():
+            if len(conflicts) <= 1:
+                continue
+            conflicts.sort(key=lambda d: d.score or 0, reverse=True)
+            winner = conflicts[0]
+            for loser in conflicts[1:]:
+                logger.warning(
+                    "声纹冲突: %s 降级 (已由 %s 匹配到 %s, 得分 %.4f vs %.4f)",
+                    loser.local_speaker_id,
+                    winner.local_speaker_id,
+                    output_id,
+                    winner.score or 0,
+                    loser.score or 0,
+                )
+                updated[loser.local_speaker_id] = SpeakerMatchDecision(
+                    status=SpeakerMatchStatus.UNKNOWN,
+                    local_speaker_id=loser.local_speaker_id,
+                    score=loser.score,
+                )
+
+        return updated
 
     @staticmethod
     def _log_decisions(
