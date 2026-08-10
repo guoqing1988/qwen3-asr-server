@@ -97,10 +97,13 @@ def check_all_models() -> list[tuple[str, str, str, Optional[str]]]:
 
 
 def fix_camplusplus_config() -> bool:
-    """修复 CAM++ 配置文件，将模型ID替换为本地路径（用于离线环境）
+    """修复 CAM++ 配置文件，将子模型路径替换为本地路径（用于离线环境）
 
-    Fix issue #15: in offline environments, the CAM++ model tries to fetch
-    dependency model config from modelscope.cn.
+    处理两种情况：
+    1. 配置中是 model ID（如 damo/speech_campplus_sv_zh-cn_16k-common）
+    2. 配置中是旧的绝对路径（如 /root/.cache/modelscope/...，Docker 迁移后）
+
+    统一替换为当前 MODELSCOPE_CACHE 下的正确路径。
 
     Returns:
         是否修复成功
@@ -112,27 +115,37 @@ def fix_camplusplus_config() -> bool:
         if not config_file.exists():
             return False
 
-        # Read the config file.
         with open(config_file, 'r', encoding='utf-8') as f:
             config = json.load(f)
 
-        # Model id to local path replacements.
-        replacements = get_camplusplus_replacement_paths(str(cache_dir))
+        # model ID → 本地路径映射
+        id_replacements = get_camplusplus_replacement_paths(str(cache_dir))
 
-        # Check whether any replacement is needed.
+        # 从旧路径中提取 model ID 的正则：匹配 .../hub/models/<model_id>
+        import re
+        _old_path_pattern = re.compile(r"/hub/models/(damo/.+)$")
+
         modified = False
         if "model" in config:
             for key in ["speaker_model", "change_locator", "vad_model"]:
-                if key in config["model"]:
-                    old_value = config["model"][key]
-                    if old_value in replacements:
-                        new_value = replacements[old_value]
-                        # Check whether the local path exists.
-                        if Path(new_value).exists():
-                            config["model"][key] = new_value
-                            modified = True
+                if key not in config["model"]:
+                    continue
+                old_value = config["model"][key]
+                new_value = None
 
-        # Write the config file back.
+                # 情况1：model ID 直接匹配
+                if old_value in id_replacements:
+                    new_value = id_replacements[old_value]
+                else:
+                    # 情况2：旧绝对路径，从中提取 model ID
+                    m = _old_path_pattern.search(old_value)
+                    if m and m.group(1) in id_replacements:
+                        new_value = id_replacements[m.group(1)]
+
+                if new_value and Path(new_value).exists():
+                    config["model"][key] = new_value
+                    modified = True
+
         if modified:
             with open(config_file, 'w', encoding='utf-8') as f:
                 json.dump(config, f, indent=4, ensure_ascii=False)

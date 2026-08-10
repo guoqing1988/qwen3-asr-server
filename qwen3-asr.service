@@ -1,0 +1,18 @@
+[Unit]
+Description=Qwen3-ASR Service
+After=network.target
+
+[Service]
+Type=simple
+User=liu
+WorkingDirectory=/data/www/qwen3-asr
+Environment="CUDA_VISIBLE_DEVICES=0"
+Environment="DEVICE=cuda:0"
+ExecStart=/data/www/qwen3-asr/.venv/bin/python start.py
+Restart=on-failure
+RestartSec=10
+StartLimitBurst=3
+StartLimitInterval=300s
+
+[Install]
+WantedBy=multi-user.target
