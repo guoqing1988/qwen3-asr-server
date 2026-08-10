@@ -240,6 +240,12 @@ start_internal_nginx_mode() {
 has_default_cmd=false
 if [[ $# -eq 2 && "$1" == "$DEFAULT_CMD_1" && "$2" == "$DEFAULT_CMD_2" ]]; then
   has_default_cmd=true
+  # 自动补装缺失的运行时依赖：容器可写层重建或复用未含 sqlite-vec 的旧镜像时，
+  # 声纹功能依赖 sqlite-vec，缺失会导致启动/接口报错。已安装时此检查秒过。
+  if ! /opt/venv/bin/python -c "import sqlite_vec" >/dev/null 2>&1; then
+    echo "[entrypoint] sqlite-vec 缺失，正在自动安装..."
+    uv pip install --python /opt/venv/bin/python "sqlite-vec>=0.1.9,<0.2"
+  fi
 fi
 
 # If user passes a custom command, respect it and bypass auto multi-GPU logic.

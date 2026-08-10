@@ -6,6 +6,7 @@ services:
       - "${NGINX_PORT:-9101}:8000"
     volumes:
       - ./app:/app/app
+      - ./scripts:/app/scripts
       - ./temp:/app/temp
       - ./logs:/app/logs
       - ./data:/app/data
