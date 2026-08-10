@@ -10,6 +10,17 @@ Qwen3-ASR 服务（GPU 版）：Qwen3-ASR-1.7B（vLLM）+ FunASR 实时流式 + 
 - **端口**：宿主 `9101` → 容器 nginx `8000` → uvicorn `18000`
 - **模型缓存**：`./models/modelscope`、`./models/huggingface` 挂载到容器 `/root/.cache/`（宿主机持久化）
 
+### 新增 Python 依赖流程（无需重新构建镜像）
+
+entrypoint 启动时执行 `uv sync --no-dev --no-install-project --frozen` 自检 `/opt/venv`（依赖已满足时秒过），`pyproject.toml` 与 `uv.lock` 已挂载进容器。
+
+1. 修改 `pyproject.toml` 添加依赖
+2. **必须同步更新 `uv.lock`**：`uv lock`（宿主机无 uv 时：`docker exec qwen3-asr sh -c "cd /app && uv lock"`）
+3. commit `pyproject.toml` + `uv.lock`
+4. 用户 `git pull` + `docker compose up -d` → 自动补装
+
+⚠️ 只改 pyproject 不更新 uv.lock → `--frozen` 报错启动失败。仅系统层依赖（apt/CUDA 等）才需要重新构建镜像。
+
 ## 测试
 
 - 宿主机 Python 3.13 与项目（3.10-3.12）不匹配，**测试在容器内跑**

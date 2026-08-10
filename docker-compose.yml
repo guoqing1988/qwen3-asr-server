@@ -7,6 +7,8 @@ services:
     volumes:
       - ./app:/app/app
       - ./scripts:/app/scripts
+      - ./pyproject.toml:/app/pyproject.toml
+      - ./uv.lock:/app/uv.lock
       - ./temp:/app/temp
       - ./logs:/app/logs
       - ./data:/app/data

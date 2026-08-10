@@ -240,12 +240,12 @@ start_internal_nginx_mode() {
 has_default_cmd=false
 if [[ $# -eq 2 && "$1" == "$DEFAULT_CMD_1" && "$2" == "$DEFAULT_CMD_2" ]]; then
   has_default_cmd=true
-  # 自动补装缺失的运行时依赖：容器可写层重建或复用未含 sqlite-vec 的旧镜像时，
-  # 声纹功能依赖 sqlite-vec，缺失会导致启动/接口报错。已安装时此检查秒过。
-  if ! /opt/venv/bin/python -c "import sqlite_vec" >/dev/null 2>&1; then
-    echo "[entrypoint] sqlite-vec 缺失，正在自动安装..."
-    uv pip install --python /opt/venv/bin/python "sqlite-vec>=0.1.9,<0.2"
-  fi
+  # 依赖自检：uv sync 按挂载的最新 uv.lock 校验 /opt/venv。
+  # 依赖已满足时本地审计秒过；代码新增依赖（pyproject.toml + uv.lock 更新）时自动补装，
+  # 无需重新构建镜像。注意：改 pyproject.toml 必须同步执行 `uv lock` 更新 uv.lock，
+  # 否则 --frozen 会因 lock 不一致而启动失败。
+  echo "[entrypoint] Checking dependencies (uv sync)..."
+  uv sync --no-dev --no-install-project --frozen
 fi
 
 # If user passes a custom command, respect it and bypass auto multi-GPU logic.
