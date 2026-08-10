@@ -240,12 +240,9 @@ start_internal_nginx_mode() {
 has_default_cmd=false
 if [[ $# -eq 2 && "$1" == "$DEFAULT_CMD_1" && "$2" == "$DEFAULT_CMD_2" ]]; then
   has_default_cmd=true
-  # 自动补装缺失的运行时依赖（容器可写层重建或复用旧镜像时兜底）。
-  # 已安装时 import 检查秒过。依赖版本对齐应在镜像构建时完成（Dockerfile 末尾 uv sync），
-  # 运行时大面积降级可能导致 C 扩展版本不兼容而段错误。
-  if ! /opt/venv/bin/python -c "import sqlite_vec" >/dev/null 2>&1; then
-    echo "[entrypoint] sqlite-vec 缺失，正在自动安装..."
-    uv pip install --python /opt/venv/bin/python "sqlite-vec>=0.1.9,<0.2"
+  # 运行时额外依赖自检：按 requirements.txt 增量补装，已安装的秒过。
+  if [[ -f /app/requirements.txt ]]; then
+    uv pip install --python /opt/venv/bin/python -r /app/requirements.txt
   fi
 fi
 

@@ -6,6 +6,8 @@ services:
       - "${NGINX_PORT:-9101}:8000"
     volumes:
       - ./app:/app/app
+      - ./scripts/docker/entrypoint.sh:/app/scripts/docker/entrypoint.sh
+      - ./requirements.txt:/app/requirements.txt
       - ./temp:/app/temp
       - ./logs:/app/logs
       - ./data:/app/data
