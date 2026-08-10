@@ -59,7 +59,8 @@ RUN uv venv /opt/venv && \
         "torch==${TORCH_VERSION}" \
         "torchaudio==${TORCHAUDIO_VERSION}" \
         "torchvision==${TORCHVISION_VERSION}" && \
-    uv pip install --reinstall "${VLLM_PACKAGE}"
+    uv pip install --reinstall "${VLLM_PACKAGE}" && \
+    uv cache clean
 
 # Fail the image build early if the runtime dependency chain is inconsistent.
 RUN /opt/venv/bin/python - <<'PY'

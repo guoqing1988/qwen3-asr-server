@@ -11,10 +11,11 @@ __pycache__
 .Python
 *.so
 
-# 虚拟环境
+# 虚拟环境（.venv 为宿主机开发环境，必须排除，否则被 COPY 进镜像膨胀 11GB+）
 venv
 env
 ENV
+.venv
 
 # IDE文件
 .vscode
