@@ -51,11 +51,15 @@ WORKDIR /app
 # Ubuntu 24.04 的 Python 是 externally managed，必须使用 venv
 RUN pip install --no-cache-dir uv
 COPY pyproject.toml uv.lock* /app/
-RUN uv venv /opt/venv && \
+# PyPI 源：uv.lock 已锁定清华镜像，默认保持一致；其他网络环境可用
+# --build-arg PIP_INDEX_URL=https://pypi.org/simple 覆盖（同时替换容器内 lock 副本的 registry）。
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+RUN sed -i "s|https://pypi.tuna.tsinghua.edu.cn/simple|${PIP_INDEX_URL}|g" /app/uv.lock && \
+    uv venv /opt/venv && \
     uv sync --no-dev --no-install-project --frozen && \
     uv pip install --reinstall \
         --index-url "${PYTORCH_CUDA_INDEX}" \
-        --extra-index-url https://pypi.org/simple \
+        --extra-index-url "${PIP_INDEX_URL}" \
         "torch==${TORCH_VERSION}" \
         "torchaudio==${TORCHAUDIO_VERSION}" \
         "torchvision==${TORCHVISION_VERSION}" && \
