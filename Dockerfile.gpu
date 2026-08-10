@@ -64,6 +64,7 @@ RUN sed -i "s|https://pypi.tuna.tsinghua.edu.cn/simple|${PIP_INDEX_URL}|g" /app/
         "torchaudio==${TORCHAUDIO_VERSION}" \
         "torchvision==${TORCHVISION_VERSION}" && \
     uv pip install --reinstall "${VLLM_PACKAGE}" && \
+    uv sync --no-dev --no-install-project --frozen && \
     uv cache clean
 
 # Fail the image build early if the runtime dependency chain is inconsistent.
