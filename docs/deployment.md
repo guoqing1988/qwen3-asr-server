@@ -78,6 +78,129 @@ CPU 镜像使用 QwenASR Rust，并自动选择 `qwen3-asr-0.6b`。x86_64 需要
 `avx2` 与 `fma`；`word_timestamps=true` 会加载 forced aligner。构建目标与
 运行时选择见主 README。
 
+### Linux 本地部署（systemd，无需 Docker）
+
+适用于已安装 NVIDIA GPU 的 Linux 服务器。直接使用 uv 创建虚拟环境在宿主机运行，
+通过 systemd 管理服务生命周期。
+
+**前置要求：**
+- Ubuntu 22.04+ / 同等 Linux 发行版
+- NVIDIA GPU + 驱动（推荐 16GB+ 显存）
+- CUDA 12.8（按 PyTorch cu128 编译）
+- [uv](https://docs.astral.sh/uv/) 包管理器（安装：`curl -LsSf https://astral.sh/uv/install.sh | sh`）
+
+**1. 创建虚拟环境并安装依赖**
+
+```bash
+cd /data/www/qwen3-asr
+
+# 创建虚拟环境（Python 3.12）
+uv venv --python 3.12
+
+# 按 pyproject.toml + uv.lock 安装全部依赖
+uv sync
+```
+
+依赖完全由 `pyproject.toml` 定义，`uv sync` 一键安装，无需单独 `pip install`。
+`requirements.txt` 仅用于 Docker 镜像运行时的增量补装，本地部署不涉及。
+
+**2. 配置环境变量**
+
+```bash
+cp .env.example .env   # 如不存在则手动创建
+```
+
+`.env` 必要配置项：
+
+| 变量 | 本地部署取值 | 说明 |
+|------|-------------|------|
+| `PORT` | `9101` | 服务监听端口 |
+| `DEVICE` | `cuda:0` | 推理设备 |
+| `HF_HUB_OFFLINE` | `1` | 离线模式，不走 HuggingFace 联网 |
+| `HF_ENDPOINT` | `https://hf-mirror.com` | HuggingFace 镜像（下载模型时临时关离线） |
+| `MODELSCOPE_CACHE` | `/data/www/qwen3-asr/models/modelscope/hub/models` | ModelScope 模型缓存路径 |
+| `HF_HOME` | `/data/www/qwen3-asr/models/huggingface` | HuggingFace 缓存路径 |
+| `API_KEY` | 与服务端鉴权一致 | 服务会校验此 Key |
+| `QWEN_GPU_MEMORY_UTILIZATION` | `0.20` | 主引擎显存占用比 |
+| `QWEN_FORCE_ALIGNER_GPU_MEMORY_UTILIZATION` | `0.15` | 对齐器显存占用比 |
+| `QWEN_IDLE_UNLOAD_TIMEOUT` | `300` | 空闲卸载超时（秒），0 禁用 |
+
+> **路径说明**：`MODELSCOPE_CACHE` 和 `HF_HOME` 必须指向实际模型目录。
+> 如果之前用过 Docker，模型已在 `models/modelscope/` 和 `models/huggingface/` 下，
+> 指向宿主机路径即可。`app/core/config.py` 的 `MODELSCOPE_PATH` 默认值为
+> `~/.cache/modelscope/hub/models`，仅在未设置 `MODELSCOPE_CACHE` 时生效。
+
+**3. 修复模型目录权限**
+
+Docker 挂载的模型文件通常属 root，本地运行时需要修正：
+
+```bash
+sudo chown -R $(whoami):$(whoami) /data/www/qwen3-asr/models/
+sudo chown -R $(whoami):$(whoami) /data/www/qwen3-asr/logs/
+sudo chown -R $(whoami):$(whoami) /data/www/qwen3-asr/temp/
+sudo chown -R $(whoami):$(whoami) /data/www/qwen3-asr/data/
+```
+
+**4. 启动验证**
+
+先直接用命令行确认能启动，再注册 systemd 服务：
+
+```bash
+cd /data/www/qwen3-asr
+.venv/bin/python start.py
+```
+
+看到 `Worker [main] 已就绪` 且日志中 `extra_failed=0` 表示所有模型加载成功。
+
+**5. 注册 systemd 服务**
+
+```bash
+sudo ln -s /data/www/qwen3-asr/qwen3-asr.service /etc/systemd/system/qwen3-asr.service
+sudo systemctl daemon-reload
+sudo systemctl enable qwen3-asr.service
+sudo systemctl start qwen3-asr.service
+```
+
+服务配置要点：
+- `Restart=on-failure`：进程异常退出自动重启，间隔 10s
+- `StartLimitBurst=3 / StartLimitInterval=300s`：5 分钟内重启超过 3 次则停止重试，防止无限重启
+- `.env` 通过 `start.py` 中的 `load_dotenv()` 加载，不需要 `EnvironmentFile=`
+- GPU 设备通过 `Environment="CUDA_VISIBLE_DEVICES=0"` 指定
+
+**6. 日常运维**
+
+```bash
+# 查看状态
+sudo systemctl status qwen3-asr
+
+# 查看日志
+sudo journalctl -u qwen3-asr -f
+
+# 重启服务（代码 bind mount 已生效时）
+sudo systemctl restart qwen3-asr
+
+# 健康检查
+curl -s http://127.0.0.1:9101/stream/v1/asr/health \
+  -H "Authorization: Bearer $API_KEY"
+
+# 服务不断重启时重置计数
+sudo systemctl reset-failed qwen3-asr
+```
+
+**7. 从 Docker 迁移到本地**
+
+如果之前使用 Docker 运行，迁移只需两步：
+
+```bash
+# ① 修正模型文件权限
+sudo chown -R $(whoami):$(whoami) /data/www/qwen3-asr/models/
+
+# ② 确保 CAM++ 子模型路径正确
+# 启动时 fix_camplusplus_config() 会自动修正 configuration.json 中的旧路径
+```
+
+其余无需变动：模型缓存、声纹数据库、`.env` 配置均兼容。
+
 ### macOS / Apple Silicon 本地部署
 
 适用于 M1/M2/M3/M4 机器上的本地 Qwen3-ASR 推理。当前 macOS 已统一走 vendored QwenASR Rust CPU backend。
