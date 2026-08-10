@@ -120,6 +120,38 @@ class IdleUnloadRouterTest(unittest.IsolatedAsyncioTestCase):
         router.stop_idle_unload_monitor()
         self.assertIsNone(router._unload_monitor_task)
 
+    async def test_vram_pressure_unloads_engine_after_cooldown(self) -> None:
+        """显存压力且冷却期过后 → 立即卸载（不等待 300s 超时）"""
+        router, engine = _build_router()
+        key = (RuntimeFamily.QWEN_VLLM, "qwen3-asr-test")
+        router._last_use[key] = time.monotonic() - 61  # 超过 60s 冷却期
+
+        await router._unload_idle_engines(300, vram_pressure=True)
+
+        self.assertEqual(engine.unload_calls, 1)
+        self.assertNotIn(key, router._shared_engines)
+
+    async def test_vram_pressure_within_cooldown_keeps_engine(self) -> None:
+        """显存压力但冷却期内 → 不卸载（避免刚用完就重载）"""
+        router, engine = _build_router()
+        key = (RuntimeFamily.QWEN_VLLM, "qwen3-asr-test")
+        router._last_use[key] = time.monotonic() - 30  # 冷却期内
+
+        await router._unload_idle_engines(300, vram_pressure=True)
+
+        self.assertEqual(engine.unload_calls, 0)
+        self.assertIn(key, router._shared_engines)
+
+    async def test_no_pressure_keeps_engine_until_timeout(self) -> None:
+        """无显存压力 → 仍按 idle 超时卸载（回归：普通模式不受影响）"""
+        router, engine = _build_router()
+        key = (RuntimeFamily.QWEN_VLLM, "qwen3-asr-test")
+        router._last_use[key] = time.monotonic() - 400
+
+        await router._unload_idle_engines(300, vram_pressure=False)
+
+        self.assertEqual(engine.unload_calls, 1)
+
 
 class BackendShutdownTest(unittest.TestCase):
     """Qwen3VLLMBackend.shutdown / Qwen3ASREngine.unload 的释放行为。"""

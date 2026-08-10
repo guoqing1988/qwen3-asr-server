@@ -23,6 +23,10 @@ from .local_pool import LocalEnginePool
 logger = logging.getLogger(__name__)
 
 _VLLM_SHARED_CONCURRENCY = 8
+# 显存压力自适应卸载：可用显存低于该值且引擎空闲时，立即卸载释放（让位其他 GPU 服务）
+_LOW_VRAM_THRESHOLD_GB = 15.0
+# 压力卸载冷却期：距引擎最后一次使用低于该值时不因压力卸载（避免刚用完就重载）
+_VRAM_PRESSURE_COOLDOWN_S = 60.0
 
 
 class RuntimeFamily(str, Enum):
@@ -184,8 +188,25 @@ class RuntimeRouter:
             if self._engine_loaded(engine):
                 return engine, semaphore
             logger.info("Engine %s was unloaded, lazy loading...", model_id)
-            # 模型加载耗时长，放入线程池避免阻塞事件循环
-            engine = await asyncio.to_thread(self._manager.create_engine, model_id)
+            # 模型加载耗时长，放入线程池避免阻塞事件循环；
+            # 宿主环境不稳定时引擎初始化偶发段错误，失败自动重试（间隔递增）
+            max_attempts = 3
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    engine = await asyncio.to_thread(
+                        self._manager.create_engine, model_id
+                    )
+                    break
+                except Exception:
+                    logger.warning(
+                        "Engine %s lazy load attempt %d/%d failed",
+                        model_id,
+                        attempt,
+                        max_attempts,
+                    )
+                    if attempt == max_attempts:
+                        raise
+                    await asyncio.sleep(attempt * 5)
             self._shared_engines[runtime_key] = engine
             self._loaded_model_ids.add(model_id)
             self._last_use[runtime_key] = time.monotonic()
@@ -317,18 +338,36 @@ class RuntimeRouter:
             self._unload_monitor_task = None
             logger.info("Idle unload monitor stopped")
 
+    @staticmethod
+    def _detect_vram_pressure() -> bool:
+        """GPU 可用显存低于阈值时视为显存压力（其他服务需要大显存）。"""
+        if not torch.cuda.is_available():
+            return False
+        try:
+            free_bytes, _total = torch.cuda.mem_get_info()
+            return free_bytes / (1024**3) < _LOW_VRAM_THRESHOLD_GB
+        except Exception:  # noqa: BLE001 - 检测失败不阻断监控
+            return False
+
     async def _idle_unload_loop(self) -> None:
         timeout = settings.QWEN_IDLE_UNLOAD_TIMEOUT
-        check_interval = min(max(timeout / 3, 5), 60)
+        # 间隔上限 30s：保证显存压力变化能被及时响应
+        check_interval = min(max(timeout / 3, 5), 30)
         while True:
             await asyncio.sleep(check_interval)
             try:
-                await self._unload_idle_engines(timeout)
+                vram_pressure = self._detect_vram_pressure()
+                await self._unload_idle_engines(timeout, vram_pressure=vram_pressure)
             except Exception as exc:  # noqa: BLE001 - 监控任务不应因单次异常退出
                 logger.warning("Idle unload check failed: %s", exc)
 
-    async def _unload_idle_engines(self, timeout: float) -> None:
-        """卸载超过 idle 阈值且无活跃请求/等待者的 vLLM 引擎。"""
+    async def _unload_idle_engines(self, timeout: float, vram_pressure: bool = False) -> None:
+        """卸载空闲的 vLLM 引擎。
+
+        普通模式：超过 idle 阈值且无活跃请求/等待者时卸载。
+        显存压力模式（vram_pressure=True）：可用显存紧张时，冷却期过后即卸载，
+        将显存让位给其他 GPU 服务（如 ComfyUI）。
+        """
         now = time.monotonic()
         for runtime_key, engine in list(self._shared_engines.items()):
             if runtime_key[0] != RuntimeFamily.QWEN_VLLM:
@@ -342,7 +381,14 @@ class RuntimeRouter:
             if semaphore is not None and semaphore.locked():
                 continue
             last_use = self._last_use.get(runtime_key)
-            if last_use is None or now - last_use < timeout:
+            if last_use is None:
+                continue
+            idle_for = now - last_use
+            if vram_pressure:
+                # 压力模式：冷却期（60s）过后即卸载，不等待完整 idle 超时
+                if idle_for < _VRAM_PRESSURE_COOLDOWN_S:
+                    continue
+            elif idle_for < timeout:
                 continue
 
             model_id = runtime_key[1]
@@ -356,9 +402,10 @@ class RuntimeRouter:
                 if semaphore is not None and semaphore.locked():
                     continue
                 logger.info(
-                    "Engine %s idle for %.0fs, unloading to release GPU memory",
+                    "Engine %s idle for %.0fs, unloading to release GPU memory%s",
                     model_id,
-                    now - last_use,
+                    idle_for,
+                    " (vram pressure)" if vram_pressure else "",
                 )
                 try:
                     await asyncio.to_thread(engine.unload)

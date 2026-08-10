@@ -299,6 +299,10 @@ class Qwen3VLLMBackend:
             raw_text = str(output.outputs[0].text if output.outputs else "")
             parsed_language, parsed_text = _parse_asr_output(raw_text, _normalize_language_name(language))
             transcripts.append(_GeneratedTranscript(text=parsed_text, language=parsed_language))
+        # 推理完成后释放本进程 CUDA 缓存池，避免峰值显存长期占用
+        # （宿主 GPU 与其他服务共享，如 ComfyUI 推理需要大显存）
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         return transcripts
 
     def transcribe_text(
@@ -443,6 +447,9 @@ class Qwen3VLLMBackend:
                 )
                 start_ms, end_ms = end_ms, start_ms
             aligned.append({"text": token, "start_ms": start_ms, "end_ms": end_ms})
+        # 对齐器推理后同样释放本进程 CUDA 缓存池
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         return aligned
 
     def init_streaming_state(

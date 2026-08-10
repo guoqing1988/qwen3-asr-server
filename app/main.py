@@ -98,9 +98,10 @@ async def lifespan(app: FastAPI):
         if not status.get("loaded") and status.get("error")
     }
     if failed_asr_models:
+        # 预加载失败不阻断启动：降级继续（其余引擎如 funasr 仍可用），
+        # 失败模型在请求时由懒加载路径自动重试恢复
         logger.error(f"Worker [{worker_id}] ASR模型预加载失败详情: {failed_asr_models}")
         emit_boot_event("error", phase="preload", message=f"ASR模型预加载失败详情: {failed_asr_models}")
-        raise RuntimeError(f"ASR model preload failed: {failed_asr_models}")
 
     logger.info(f"Worker [{worker_id}] 已就绪")
     emit_boot_event("ready", phase="worker", message=f"Worker [{worker_id}] 已就绪")

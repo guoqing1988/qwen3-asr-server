@@ -109,6 +109,20 @@ curl -X POST "http://localhost:9101/v1/audio/transcriptions" \
   -F "model=qwen3-asr-1.7b"
 ```
 
+### 引擎加载容错说明
+
+vLLM 引擎初始化在特定宿主环境（如 CPU 电压不稳、驱动兼容问题）下可能偶发段错误（SIGSEGV）。服务内置两层容错：
+
+1. **懒加载自动重试**：引擎被空闲卸载后，请求触发懒加载时创建失败会自动重试 3 次（间隔 5s/10s 递增），提高恢复概率。
+2. **预加载失败降级启动**：启动时 qwen3 引擎预加载失败不再拒绝启动（降级继续，funasr 等其余引擎照常服务），失败引擎在后续请求时由懒加载路径自动重试恢复。
+
+### 显存释放策略
+
+vLLM 引擎在线时峰值显存较大（推理后主进程持有音频编码器 buffer，属正常架构开销）。服务按两级策略释放显存，让位给同一 GPU 上的其他服务（如 ComfyUI）：
+
+1. **空闲自动卸载**：`QWEN_IDLE_UNLOAD_TIMEOUT` 秒（默认 300）无请求即卸载全部引擎。
+2. **显存压力自适应卸载**：GPU 可用显存低于 15GB 且引擎空闲超过 60s 冷却期时，立即卸载引擎释放显存（日志标记 `(vram pressure)`）。阈值与冷却期在 `app/services/asr/runtime/router.py` 的 `_LOW_VRAM_THRESHOLD_GB` / `_VRAM_PRESSURE_COOLDOWN_S` 中配置。
+
 ## 从源码构建镜像
 
 ### 使用构建脚本
