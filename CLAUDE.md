@@ -11,16 +11,21 @@ Qwen3-ASR 服务（GPU 版）：Qwen3-ASR-1.7B（vLLM）+ FunASR 实时流式 + 
 - **模型缓存**：`./models/modelscope`、`./models/huggingface` 挂载到容器 `/root/.cache/`（宿主机持久化）
 - **启动流程**：镜像内置 entrypoint 启动 uvicorn → start.py 检查模型缺失则自动下载 → main.py lifespan 预加载引擎 → 就绪。宿主机代码通过 `./app:/app/app` 挂载覆盖镜像内旧代码即时生效
 
-### 新增 Python 依赖流程（需重新构建镜像）
+### 新增 Python 依赖流程
 
-项目**不在运行时自动同步依赖**（避免大面积降级导致 C 扩展版本不兼容段错误）。新增依赖需要：
+项目通过 `requirements.txt` 管理运行时额外依赖（`pyproject.toml` 的子集）。entrypoint 启动时 `uv pip install -r` 增量补装，已安装的秒过。
 
+**运行环境增量加包（无需 rebuild 镜像）**：
 1. 修改 `pyproject.toml` 添加依赖
-2. **必须同步更新 `uv.lock`**：`uv lock`（宿主机无 uv 时：`docker exec qwen3-asr sh -c "cd /app && uv lock"`）
-3. 重新构建镜像：`docker build -f Dockerfile.gpu -t quantatrisk/qwen3-asr:gpu-latest .`
-4. `docker compose up -d` 重建容器
+2. `uv lock` 更新 uv.lock（宿主机无 uv 时：`docker exec qwen3-asr sh -c "cd /app && uv lock"`）
+3. **同步更新 `requirements.txt`**（版本范围与 pyproject.toml 一致）
+4. commit → `docker compose up -d` → entrypoint 自动补装
 
-⚠️ 只改 pyproject 不更新 uv.lock → `--frozen` 报错构建失败。仅临时调试可用 `docker exec qwen3-asr uv pip install --python /opt/venv/bin/python <包名>`（容器重建后丢失）。
+**正式发布（rebuild 镜像）**：
+1. 上述步骤 + `docker build -f Dockerfile.gpu -t quantatrisk/qwen3-asr:gpu-latest .`
+2. 若 venv 已包含（不再需要运行时补装），可从 `requirements.txt` 移除该依赖
+
+⚠️ `requirements.txt` 与 `pyproject.toml` 版本范围必须一致，否则两个文件指向不同版本。
 
 ## 测试
 
