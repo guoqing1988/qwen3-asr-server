@@ -174,9 +174,5 @@ modelscope/
 
 *.gz
 
-*CLAUDE.md
-*AGENTS.md
-
-
 video/
 data/
