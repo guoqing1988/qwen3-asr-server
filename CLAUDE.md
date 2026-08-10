@@ -9,17 +9,18 @@ Qwen3-ASR 服务（GPU 版）：Qwen3-ASR-1.7B（vLLM）+ FunASR 实时流式 + 
 - **日志**：`docker logs -f qwen3-asr`
 - **端口**：宿主 `9101` → 容器 nginx `8000` → uvicorn `18000`
 - **模型缓存**：`./models/modelscope`、`./models/huggingface` 挂载到容器 `/root/.cache/`（宿主机持久化）
+- **启动流程**：镜像内置 entrypoint 启动 uvicorn → start.py 检查模型缺失则自动下载 → main.py lifespan 预加载引擎 → 就绪。宿主机代码通过 `./app:/app/app` 挂载覆盖镜像内旧代码即时生效
 
-### 新增 Python 依赖流程（无需重新构建镜像）
+### 新增 Python 依赖流程（需重新构建镜像）
 
-entrypoint 启动时执行 `uv sync --no-dev --no-install-project --frozen` 自检 `/opt/venv`（依赖已满足时秒过），`pyproject.toml` 与 `uv.lock` 已挂载进容器。
+项目**不在运行时自动同步依赖**（避免大面积降级导致 C 扩展版本不兼容段错误）。新增依赖需要：
 
 1. 修改 `pyproject.toml` 添加依赖
 2. **必须同步更新 `uv.lock`**：`uv lock`（宿主机无 uv 时：`docker exec qwen3-asr sh -c "cd /app && uv lock"`）
-3. commit `pyproject.toml` + `uv.lock`
-4. 用户 `git pull` + `docker compose up -d` → 自动补装
+3. 重新构建镜像：`docker build -f Dockerfile.gpu -t quantatrisk/qwen3-asr:gpu-latest .`
+4. `docker compose up -d` 重建容器
 
-⚠️ 只改 pyproject 不更新 uv.lock → `--frozen` 报错启动失败。仅系统层依赖（apt/CUDA 等）才需要重新构建镜像。
+⚠️ 只改 pyproject 不更新 uv.lock → `--frozen` 报错构建失败。仅临时调试可用 `docker exec qwen3-asr uv pip install --python /opt/venv/bin/python <包名>`（容器重建后丢失）。
 
 ## 测试
 
@@ -39,9 +40,9 @@ entrypoint 启动时执行 `uv sync --no-dev --no-install-project --frozen` 自�
 
 ## 已知问题与排障（详见 docs/troubleshooting.md）
 
-- **宿主 i9-14900K 硬件不稳定**：随机 general protection fault / segfault，波及所有进程（含 vLLM EngineCore、Claude Code）。症状：`Failed core proc(s): {'EngineCore': -11}`。排查：`grep -E "general protection fault|segfault" /var/log/kern.log`。**治本：更新 BIOS/Intel 0x12B 微码**
 - **vLLM 显存峰值**：推理后主进程持有 encoder buffer（reserved 非 allocated），`empty_cache` 无效；靠空闲/压力卸载释放
 - **镜像膨胀**：`uv pip install` 缓存 `/root/.cache/uv`（~21GB）未清理，Dockerfile 需 `uv cache clean`
+- **uv.lock 版本滞后**：lock 锁定的旧版 C 扩展与当前环境不兼容，**严禁运行时 `uv sync --frozen` 大面积降级**（会导致段错误）
 - 容器重建丢可写层：`docker exec` 装的包（pytest 等）需重装；`.env` 备份放 `.env.bak.*`
 
 ## 约定

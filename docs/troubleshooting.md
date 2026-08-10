@@ -2,38 +2,43 @@
 
 本文记录实际生产中遇到的故障与排查方法，供后续快速定位类似问题。
 
-## 2026-08-10：vLLM EngineCore 间歇性段错误与宿主硬件故障
+## 2026-08-10：容器间歇性段错误（SIGSEGV）排查全过程
 
 ### 现象
 
 - 容器启动时 `Failed core proc(s): {'EngineCore': -11}`（SIGSEGV）或 `Failed core proc(s): {}`（空集）
-- 错误在加载 Qwen3-ForcedAligner 引擎阶段，主引擎 Qwen3-ASR 正常
-- 偶发伴随 `double free or corruption (!prev)`（glibc 堆损坏）
+- 偶发 `Aborted (core dumped)` / `double free or corruption (!prev)`（glibc 堆损坏）
+- 崩溃发生在 CAM++/PUNC 等 modelscope 模型加载阶段，或 vLLM EngineCore 初始化阶段
 - 同一时段 Claude Code 客户端（Bun）也段错误崩溃
-- 空闲 300s 后引擎卸载，下次请求懒加载重载同样间歇性失败
+- 用 `docker run` 无挂载启动测试容器正常，用 `docker compose`（挂载代码）崩
 
-### 根因（排查顺序）
+### 排查过程
 
-1. **不要只盯着应用层**。多个无关进程（apport、systemd-udevd、python、Bun、vLLM EngineCore）在同一时段段错误，强烈提示宿主系统级问题。查内核日志：
-
+1. **初期怀疑硬件**：宿主多个无关进程（apport、systemd-udevd、python）同时段 GPF，且为 i9-14900K。查内核日志：
    ```bash
    grep -E "general protection fault|segfault" /var/log/kern.log
    ```
+   但服务崩溃模式高度一致（7 次都是同一个 python3.12 内存地址 `[420000+2e3000]`），不像硬件随机性。
 
-   结果：宿主 Intel i9-14900K（13/14 代已知 CPU 电压不稳问题）在 13:17 起间歇性产生 GPF，波及所有进程。
+2. **排除文件损坏**：`md5sum` 对比容器内与宿主机挂载目录——文件完全一致。
 
-2. **区分"容器问题"与"宿主问题"**：
-   - `docker inspect qwen3-asr --format '{{.Created}}'` 判断容器是否被重建（重建清空可写层）
-   - `docker diff qwen3-asr` 查看可写层变更（nvidia runtime 注入宿主驱动库是正常行为，非污染）
-   - `md5sum` 对比容器内与挂载目录文件，排除挂载/文件损坏嫌疑
+3. **锁定真正根因：`uv sync --frozen` 运行时降级**。镜像 build 时 `uv pip install vllm[audio]` 装了新版 C 扩展（xgrammar 0.2.3 等），entrypoint 中 `uv sync --frozen` 按 lock 将 91 个包**降级到旧版**——新版 .so 文件被旧 Python wrapper 加载，版本不兼容导致段错误。证据：
+   - `docker run --rm <镜像> uv sync --frozen --dry-run` 显示 Would download 91 packages
+   - 去掉运行时 `uv sync` 后**立即正常**
+   - 在 Dockerfile build 末尾加 `uv sync --frozen` 对齐后，build 出来的镜像反而崩溃（build 时降级同样不兼容）
 
-3. **vLLM 崩溃点定位**：`-11` = 子进程 SIGSEGV；`{}` 空集 = EngineCore 未留下退出码（崩溃更早）。Rust 栈（`tokenizers BpeBuilder::build` 中 String::clone 崩溃）= 堆内存损坏，是宿主数据损坏的典型表现。
+### 解决
 
-### 解决（应用层容错，宿主需 BIOS/微码更新治本）
+- **入口点**：不执行运行时大面积依赖同步（只保留 sqlite-vec 按需检查）
+- **依赖对齐**：不应在构建时或运行时降级——`uv.lock` 锁定的旧版本与当前 PyTorch 2.10 + CUDA 12.8 环境不兼容
+- **正确的依赖策略**：新增依赖需**重新构建镜像**（含 `uv lock` 更新 lock），不在运行时改 venv
+- 详见 `CLAUDE.md`「新增 Python 依赖流程」和 `docs/deployment.md`「引擎加载容错说明」
 
-- **懒加载自动重试**：引擎创建失败重试 3 次（间隔递增），落在故障窗口间隙
-- **预加载失败降级启动**：qwen3 失败不再拒绝启动，funasr 兜底，失败引擎懒加载恢复
-- 详见 `docs/deployment.md`「引擎加载容错说明」
+### 关键教训
+
+- **`uv sync --frozen` 在运行时做是大忌**：lock 与镜像 venv 版本不一致时，原地降级 C 扩展极大概率段错误
+- **C 扩展 Crash 的特征**：崩溃地址固定（`python3.12[420000+2e3000]`），不是硬件随机性
+- **隔离测试 vs compose 的差异**：`docker run` 用镜像内代码，`docker compose` 用挂载代码——排查时间歇性表现可用此方法排除代码变动嫌疑
 
 ## vLLM 显存占用排查
 
