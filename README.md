@@ -39,7 +39,38 @@
 
 ## 快速部署
 
-### 1. Docker 部署(推荐)
+### 1. 本地 systemd 部署（推荐，无需 Docker）
+
+适用于已安装 NVIDIA GPU 的 Linux 服务器：
+
+```bash
+# 安装 uv 包管理器
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# 克隆并安装依赖
+git clone <your-repo> && cd qwen3-asr
+uv venv --python 3.12
+uv sync
+
+# 配置环境变量
+cp .env.example .env  # 按需修改（PORT, MODELSCOPE_CACHE, HF_HOME 等）
+
+# 修正 Docker 遗留的模型文件权限（如有）
+sudo chown -R $(whoami):$(whoami) models/ logs/ temp/ data/
+
+# 注册并启动服务
+sudo ln -s /data/www/qwen3-asr/qwen3-asr.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now qwen3-asr
+```
+
+服务访问地址：
+- **API 端点**: `http://localhost:9101`
+- **API 文档**: `http://localhost:9101/docs`
+
+> 详细步骤见 [部署指南 → Linux 本地部署](./docs/deployment.md#linux-本地部署systemd无需-docker)
+
+### 2. Docker 部署
 
 ```bash
 # 复制并编辑配置
@@ -142,8 +173,8 @@ docker compose up -d
 
 | 模式 | 命令 | 说明 |
 |------|------|------|
-| GPU（默认） | `uv sync` | 同步根目录 [pyproject.toml](/opt/qwen3-asr/pyproject.toml) 和 [uv.lock](/opt/qwen3-asr/uv.lock) 到 `.venv`，包含 CUDA 12.8/cu128 `torch/torchaudio/torchvision` |
-| CPU（特化） | `./scripts/sync_cpu_env.sh` | 同步 [environments/cpu/pyproject.toml](/opt/qwen3-asr/environments/cpu/pyproject.toml) 对应的 CPU lock 到 `.venv` |
+| GPU（默认） | `uv sync` | 同步根目录 [pyproject.toml](pyproject.toml) 和 [uv.lock](uv.lock) 到 `.venv`，包含 CUDA 12.8/cu128 `torch/torchaudio/torchvision` |
+| CPU（特化） | `./scripts/sync_cpu_env.sh` | 同步 [environments/cpu/pyproject.toml](environments/cpu/pyproject.toml) 对应的 CPU lock 到 `.venv` |
 
 ```bash
 # 克隆项目
@@ -595,18 +626,22 @@ curl -X DELETE 'http://localhost:9101/api/v1/voiceprint-speakers/{speaker_id}'
 
 | 变量                               | 默认值       | 说明                                            |
 | ---------------------------------- | ------------ | ----------------------------------------------- |
-| `NGINX_PORT`                    | `9101`     | Docker Compose 映射到宿主机的端口             |
-| `API_KEY`                       | -           | API 认证密钥（可选，未配置时无需认证）        |
-| `CUDA_VISIBLE_DEVICES`          | `0`         | GPU Compose 可见设备列表，多卡用 `0,1,2,3`   |
-| `QWEN3_ASR_MODEL`               | 自动选择     | 强制选择 `qwen3-asr-1.7b` 或 `qwen3-asr-0.6b` |
-| `HF_HUB_OFFLINE`                | `0`         | 离线部署且模型已准备好时设为 `1`              |
-| `HF_ENDPOINT`                   | -           | 在线镜像站；离线部署不要设置                  |
-| `QWEN_GPU_MEMORY_UTILIZATION`   | 自动计算     | 主 ASR 模型的 vLLM 显存利用率（0.0-1.0）。默认按 `12GB / 总显存` 自动计算；调低可减少常驻显存 |
+| `PORT` | `8000` | 服务监听端口（本地 systemd 运行时设为 `9101`） |
+| `DEVICE` | `auto` | 推理设备（`cuda:0`、`cpu`） |
+| `NGINX_PORT` | `9101` | Docker Compose 映射到宿主机的端口 |
+| `API_KEY` | - | API 认证密钥（可选，未配置时无需认证） |
+| `CUDA_VISIBLE_DEVICES` | `0` | GPU 设备列表，多卡用 `0,1,2,3` |
+| `QWEN3_ASR_MODEL` | 自动选择 | 强制选择 `qwen3-asr-1.7b` 或 `qwen3-asr-0.6b` |
+| `HF_HUB_OFFLINE` | `0` | 离线部署且模型已准备好时设为 `1` |
+| `HF_ENDPOINT` | - | 在线镜像站；离线部署不要设置 |
+| `HF_HOME` | `~/.cache/huggingface` | HuggingFace 缓存目录（本地运行时设为项目的 `models/huggingface`） |
+| `MODELSCOPE_CACHE` | `~/.cache/modelscope/hub/models` | ModelScope 模型缓存路径（本地运行时设为项目的 `models/modelscope/hub/models`） |
+| `QWEN_GPU_MEMORY_UTILIZATION` | 自动计算 | 主 ASR 模型的 vLLM 显存利用率（0.0-1.0）。默认按 `12GB / 总显存` 自动计算；调低可减少常驻显存 |
 | `QWEN_FORCE_ALIGNER_GPU_MEMORY_UTILIZATION` | 继承主模型 | forced aligner（词级时间戳）vLLM 实例的显存利用率（0.0-1.0） |
-| `QWEN_IDLE_UNLOAD_TIMEOUT`      | `300`       | 无请求超过该秒数后卸载 vLLM 引擎释放显存；`0` 禁用空闲卸载 |
-| `VOICEPRINT_ENABLED`            | `true`      | 是否启用 ASR 结果声纹身份匹配 |
-| `VOICEPRINT_DB_PATH`            | `./data/voiceprints.sqlite3` | SQLite + sqlite-vec 声纹数据库路径 |
-| `VOICEPRINT_MATCH_THRESHOLD`    | `0.70`      | 说话人身份匹配阈值 |
+| `QWEN_IDLE_UNLOAD_TIMEOUT` | `300` | 无请求超过该秒数后卸载 vLLM 引擎释放显存；`0` 禁用空闲卸载 |
+| `VOICEPRINT_ENABLED` | `true` | 是否启用 ASR 结果声纹身份匹配 |
+| `VOICEPRINT_DB_PATH` | `./data/voiceprints.sqlite3` | SQLite + sqlite-vec 声纹数据库路径 |
+| `VOICEPRINT_MATCH_THRESHOLD` | `0.70` | 说话人身份匹配阈值 |
 
 ### 显存控制与空闲卸载
 

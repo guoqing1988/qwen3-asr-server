@@ -73,3 +73,48 @@
 - 可写层中的临时安装（`docker exec pip install` 的包、pytest 等）重建后丢失，需重新安装
 - 本项目 `tests/` 目录未挂载进容器，容器内跑测试需 `docker cp` 测试文件（或在 CI 环境跑）
 - `.env` 修改需重建容器才生效（`docker restart` 不重读 .env）
+
+## 2026-08-10：Docker → 本地 systemd 迁移问题
+
+### CAM++ 说话人分离模型加载失败（离线环境 400 错误）
+
+**现象**：
+```
+ERROR - 400 Client Error: Bad Request for url: https://www.modelscope.cn/api/v1/models//root?Revision=master
+ERROR - CAM++ 模型加载失败: SegmentationClusteringPipeline: invalid model repo path
+```
+
+**根因**：CAM++ 的 `configuration.json` 中子模型路径（`speaker_model`、`change_locator`、`vad_model`）仍指向 Docker 容器路径 `/root/.cache/modelscope/hub/models/damo/...`，本地运行时 `MODELSCOPE_CACHE` 指向 `/data/www/qwen3-asr/models/modelscope/hub/models/`，modelscope 在本地找不到这些路径时尝试联网解析。
+
+**解决**：`fix_camplusplus_config()` 在每次启动时自动修正，支持从旧绝对路径中提取 model ID 再映射到当前 `MODELSCOPE_CACHE` 路径。若仍有问题：
+```bash
+# 检查子模型目录权限（Docker 挂载的模型属 root）
+sudo chown -R $(whoami):$(whoami) /data/www/qwen3-asr/models/
+```
+
+### 模型文件权限问题（Permission denied）
+
+**现象**：`MODELSCOPE_CACHE` 指向的模型目录无法读取。
+
+**根因**：`models/` 下的文件是 Docker 挂载时由容器写入的，属 root:root。
+
+**解决**：
+```bash
+sudo chown -R $(whoami):$(whoami) /data/www/qwen3-asr/models/
+sudo chown -R $(whoami):$(whoami) /data/www/qwen3-asr/logs/
+sudo chown -R $(whoami):$(whoami) /data/www/qwen3-asr/temp/
+sudo chown -R $(whoami):$(whoami) /data/www/qwen3-asr/data/
+```
+
+### 服务频繁重启（systemd StartLimit）
+
+**现象**：`systemctl status` 显示 `start limit hit`，服务不再自动重启。
+
+**根因**：服务配置了 `StartLimitBurst=3`，5 分钟内重启超过 3 次触发保护。
+
+**解决**：
+```bash
+# 先修复启动失败根因，然后重置计数
+sudo systemctl reset-failed qwen3-asr
+sudo systemctl start qwen3-asr
+```

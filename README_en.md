@@ -39,7 +39,38 @@ Speech recognition API service centered on [Qwen3-ASR](https://github.com/QwenLM
 
 ## Quick Deployment
 
-### 1. Docker Deployment (Recommended)
+### 1. Local systemd Deployment (Recommended, no Docker)
+
+For Linux servers with NVIDIA GPU:
+
+```bash
+# Install uv package manager
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Clone and install dependencies
+git clone <your-repo> && cd qwen3-asr
+uv venv --python 3.12
+uv sync
+
+# Configure
+cp .env.example .env  # edit PORT, MODELSCOPE_CACHE, HF_HOME etc.
+
+# Fix model file permissions (if migrated from Docker)
+sudo chown -R $(whoami):$(whoami) models/ logs/ temp/ data/
+
+# Register and start service
+sudo ln -s /data/www/qwen3-asr/qwen3-asr.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now qwen3-asr
+```
+
+Service URLs:
+- **API Endpoint**: `http://localhost:9101`
+- **API Docs**: `http://localhost:9101/docs`
+
+> See [Deployment Guide → Local Deployment](./docs/deployment.md#linux-本地部署systemd无需-docker) for details.
+
+### 2. Docker Deployment
 
 ```bash
 # Copy and edit configuration
@@ -611,12 +642,16 @@ Settings in `.env.example`:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `PORT` | `8000` | Service listen port (set to `9101` for local systemd deployment) |
+| `DEVICE` | `auto` | Inference device (`cuda:0`, `cpu`) |
 | `NGINX_PORT` | `9101` | Host port exposed by Docker Compose |
 | `API_KEY` | - | API authentication key (optional, unauthenticated if not set) |
 | `CUDA_VISIBLE_DEVICES` | `0` | Visible GPU list; one backend instance is started per visible GPU |
 | `QWEN3_ASR_MODEL` | auto | Force `qwen3-asr-1.7b` or `qwen3-asr-0.6b` instead of VRAM-based selection |
 | `HF_HUB_OFFLINE` | unset | Set to `1` only after preparing `./models` for offline deployment |
 | `HF_ENDPOINT` | unset | Online Hugging Face mirror endpoint, for example `https://hf-mirror.com` |
+| `HF_HOME` | `~/.cache/huggingface` | HuggingFace cache directory (set to project `models/huggingface` for local deployment) |
+| `MODELSCOPE_CACHE` | `~/.cache/modelscope/hub/models` | ModelScope model cache path (set to project `models/modelscope/hub/models` for local deployment) |
 | `QWEN_GPU_MEMORY_UTILIZATION` | auto | vLLM GPU memory utilization (0.0-1.0) for the main ASR model. Default is auto-calculated as `12GB / total VRAM`; lower it to reduce resident VRAM |
 | `QWEN_FORCE_ALIGNER_GPU_MEMORY_UTILIZATION` | inherits | GPU memory utilization for the forced aligner vLLM instance (0.0-1.0) |
 | `QWEN_IDLE_UNLOAD_TIMEOUT` | `300` | Unload vLLM engines to release VRAM after this many seconds without requests; `0` disables idle unload |
