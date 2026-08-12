@@ -216,9 +216,7 @@ class SqliteVecVoiceprintStore:
                 WITH nearest AS (
                     SELECT rowid, distance
                     FROM voiceprint_vectors
-                    WHERE embedding MATCH ?
-                    ORDER BY distance
-                    LIMIT ?
+                    WHERE embedding MATCH ? AND k = ?
                 )
                 SELECT
                     s.id AS speaker_id,

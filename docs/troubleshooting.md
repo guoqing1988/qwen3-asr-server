@@ -74,6 +74,19 @@
 - 本项目 `tests/` 目录未挂载进容器，容器内跑测试需 `docker cp` 测试文件（或在 CI 环境跑）
 - `.env` 修改需重建容器才生效（`docker restart` 不重读 .env）
 
+## 2026-08-12：说话人声纹匹配失败（sqlite-vec KNN 查询报错）
+
+**现象**：长音频转录结果中说话人未匹配到注册声纹，日志出现
+```
+Voiceprint enrichment failed; keep diarization labels: A LIMIT or 'k = ?' constraint is required on vec0 knn queries.
+```
+
+**根因**：sqlite-vec 0.1.9 的 `vec0` KNN 查询**不支持 `ORDER BY distance LIMIT ?` 语法**（即使 LIMIT 为常量也报错），必须使用 `k = ?` 约束。`SqliteVecVoiceprintStore.search()` 中的 KNN 查询沿用了旧版语法，导致整个声纹匹配链路报错降级为保留 diarization 标签。
+
+**解决**：KNN 查询改为 `WHERE embedding MATCH ? AND k = ?`（`k` 绑定为候选数上限），外层 JOIN 过滤逻辑不变。
+
+**排查命令**：`.venv/bin/python -m pytest tests/test_voiceprint_matching.py -v`（`test_sqlite_vec_store_groups_multiple_samples_by_speaker` 覆盖完整 KNN 链路）
+
 ## 2026-08-10：Docker → 本地 systemd 迁移问题
 
 ### CAM++ 说话人分离模型加载失败（离线环境 400 错误）
