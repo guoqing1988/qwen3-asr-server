@@ -106,13 +106,96 @@ def _split_alignment_units(text: str) -> list[str]:
     # Mixed Chinese/English transcripts should not fall back to whitespace-only
     # tokenization, otherwise a long CJK sentence with a single embedded English
     # word can collapse into one giant alignment unit.
+    # 独立标点不作为对齐单元（无语音内容，模型预测不稳定，见 docs/troubleshooting.md）；
+    # 词内符号（' . _ + -）随词保留，如 "don't"、"state-of-the-art"、"1.5"。
     token_pattern = re.compile(
         r"[\u4e00-\u9fff]"                    # CJK ideographs, align per character
-        r"|[A-Za-z0-9]+(?:['._+-][A-Za-z0-9]+)*"  # Latin / alnum words
-        r"|[^\w\s]",                         # punctuation and symbols
+        r"|[A-Za-z0-9]+(?:['._+-][A-Za-z0-9]+)*",  # Latin / alnum words
         re.UNICODE,
     )
     return token_pattern.findall(text)
+
+
+def _fix_timestamp(data: list[float]) -> list[float]:
+    """修复 forced aligner 时间戳序列的乱序（移植官方 qwen_asr fix_timestamp）。
+
+    对整条时间戳序列（每对齐单元 2 个：start/end）求最长递增子序列（LIS），
+    不在 LIS 上的位置视为异常：连续异常 ≤2 个时用左右最近正常值就近填充，
+    否则按左右正常值线性插值，保证输出全局单调递增。
+    标点等无语音单元的单点乱序（start > end 或跨单元回退）在此统一修复。
+    """
+    n = len(data)
+    if n <= 1:
+        return data.copy()
+
+    # LIS 动态规划（O(n²)，对齐按 segment 分批进行，n 为数百量级，开销可忽略）
+    dp = [1] * n
+    parent = [-1] * n
+    for i in range(1, n):
+        for j in range(i):
+            if data[j] <= data[i] and dp[j] + 1 > dp[i]:
+                dp[i] = dp[j] + 1
+                parent[i] = j
+
+    max_length = max(dp)
+    max_idx = dp.index(max_length)
+
+    lis_indices: list[int] = []
+    idx = max_idx
+    while idx != -1:
+        lis_indices.append(idx)
+        idx = parent[idx]
+    lis_indices.reverse()
+
+    is_normal = [False] * n
+    for idx in lis_indices:
+        is_normal[idx] = True
+
+    result = data.copy()
+    i = 0
+    while i < n:
+        if not is_normal[i]:
+            j = i
+            while j < n and not is_normal[j]:
+                j += 1
+            anomaly_count = j - i
+
+            left_val: float | None = None
+            for k in range(i - 1, -1, -1):
+                if is_normal[k]:
+                    left_val = result[k]
+                    break
+            right_val: float | None = None
+            for k in range(j, n):
+                if is_normal[k]:
+                    right_val = result[k]
+                    break
+
+            if anomaly_count <= 2:
+                # 就近取左右正常值（平局取左）；异常段两侧至少一侧有正常值
+                for k in range(i, j):
+                    if left_val is None:
+                        result[k] = right_val
+                    elif right_val is None:
+                        result[k] = left_val
+                    else:
+                        result[k] = left_val if (k - (i - 1)) <= (j - k) else right_val
+            elif left_val is not None and right_val is not None:
+                # 连续异常较多时按左右正常值线性插值
+                step = (right_val - left_val) / (anomaly_count + 1)
+                for k in range(i, j):
+                    result[k] = left_val + step * (k - i + 1)
+            elif left_val is not None:
+                for k in range(i, j):
+                    result[k] = left_val
+            elif right_val is not None:
+                for k in range(i, j):
+                    result[k] = right_val
+            i = j
+        else:
+            i += 1
+
+    return result
 
 
 def _resolve_forced_aligner_gpu_memory_utilization(primary_utilization: float) -> float:
@@ -434,19 +517,27 @@ class Qwen3VLLMBackend:
                 f"expected={expected_timestamps}, got={len(ts_predictions)}, tokens={len(tokens)}"
             )
 
-        aligned: list[dict[str, float | str]] = []
-        for index, token in enumerate(tokens):
-            start_ms = ts_predictions[index * 2]
-            end_ms = ts_predictions[index * 2 + 1]
-            if end_ms < start_ms:
-                logger.warning(
-                    "Forced aligner produced reversed timestamps for token=%r: start_ms=%s end_ms=%s",
-                    token,
-                    start_ms,
-                    end_ms,
-                )
-                start_ms, end_ms = end_ms, start_ms
-            aligned.append({"text": token, "start_ms": start_ms, "end_ms": end_ms})
+        # 整条序列全局单调化（标点等无语音单元偶发乱序在此修复），
+        # 替换原先仅逐 token 交换 start/end 的局部处理
+        fixed_predictions = _fix_timestamp(ts_predictions)
+        anomaly_count = sum(
+            1 for original, fixed in zip(ts_predictions, fixed_predictions) if original != fixed
+        )
+        if anomaly_count:
+            logger.info(
+                "Forced aligner timestamps fixed: %d/%d anomaly predictions corrected",
+                anomaly_count,
+                len(ts_predictions),
+            )
+
+        aligned = [
+            {
+                "text": token,
+                "start_ms": fixed_predictions[index * 2],
+                "end_ms": fixed_predictions[index * 2 + 1],
+            }
+            for index, token in enumerate(tokens)
+        ]
         # 对齐器推理后同样释放本进程 CUDA 缓存池
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

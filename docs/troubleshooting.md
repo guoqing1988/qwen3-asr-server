@@ -87,6 +87,24 @@ Voiceprint enrichment failed; keep diarization labels: A LIMIT or 'k = ?' constr
 
 **排查命令**：`.venv/bin/python -m pytest tests/test_voiceprint_matching.py -v`（`test_sqlite_vec_store_groups_multiple_samples_by_speaker` 覆盖完整 KNN 链路）
 
+## 2026-08-12：Forced aligner 反转时间戳警告
+
+**现象**：日志出现
+```
+Forced aligner produced reversed timestamps for token='，': start_ms=1120.0 end_ms=960.0
+```
+反转均发生在标点上，幅度 2-3 个分类 bin（`timestamp_segment_time=80ms`，即 160-240ms）。
+
+**根因**：与官方 `qwen_asr` 实现有两处差异：
+1. 本项目把独立标点（`，`、`。` 等）作为对齐单元送入 forced aligner——标点无语音内容，模型的 token_classify 预测分布平坦、argmax 不稳定，偶发 start/end 乱序。官方 `Qwen3ForceAlignProcessor` 会剔除标点（仅保留 `'`、字母、数字）。
+2. 缺少官方 `fix_timestamp` 后处理——官方对整条时间戳序列做 LIS 单调化 + 异常段插值，本项目原先仅逐 token 交换 start/end。
+
+**解决**：`_split_alignment_units` 剔除独立标点（词内符号如 `'`、`-` 随词保留）+ 移植官方 `fix_timestamp`（`_fix_timestamp`，全局 LIS 单调化 + 就近填充/线性插值），解析时不再产生反转警告。
+
+**边界情况（非故障）**：若音频段含较长静音前缀（VAD 未切分），ASR 文本开头 token 需对齐到静音区，模型预测乱序，`_fix_timestamp` 的 LIS 会把这些位置归零（输出单调但时间戳为 0）。这是模型无法对齐静音区的固有行为，纯语音段（VAD 正常切分）无此现象；旧实现此时输出乱飞的非零值（更差）。
+
+**排查命令**：`.venv/bin/python -m pytest tests/test_qwen3_align.py -v`（切分、单调化、align 解析链路全覆盖）
+
 ## 2026-08-10：Docker → 本地 systemd 迁移问题
 
 ### CAM++ 说话人分离模型加载失败（离线环境 400 错误）
