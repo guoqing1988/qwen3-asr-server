@@ -21,6 +21,21 @@ from app.services.speaker import get_speaker_identification_service
 logger = logging.getLogger(__name__)
 
 
+def merge_hotwords(default: str, request: str) -> str:
+    """合并默认热词与请求热词。
+
+    按空白分词、精确匹配去重（大小写敏感，避免破坏英文写法）、
+    保持顺序（默认在前、请求在后）。
+    """
+    seen: set[str] = set()
+    merged: list[str] = []
+    for word in f"{default} {request}".split():
+        if word not in seen:
+            seen.add(word)
+            merged.append(word)
+    return " ".join(merged)
+
+
 @dataclass(frozen=True)
 class PreparedAudio:
     normalized_path: str
