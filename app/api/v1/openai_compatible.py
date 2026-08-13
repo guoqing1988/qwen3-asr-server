@@ -410,7 +410,8 @@ def _get_transcription_description() -> str:
 - `/v1/models` 仍可用于查看当前服务端实际在线模型
 
 **热词上下文：**
-- `prompt` 可传公司/行业专有名词（如 `阿里巴巴 OpenAI Kubernetes`），与 `ASR_DEFAULT_HOTWORDS` 预设热词合并后注入识别上下文，改善专有名词与英文短语识别
+- `prompt` 可传公司/行业专有名词（英文逗号分隔，如 `阿里巴巴,OpenAI,Kubernetes,Bank of China`），与 `ASR_DEFAULT_HOTWORDS` 预设热词合并后注入识别上下文，改善专有名词与英文短语识别
+- 短语内部空格保留（如 `Bank of China` 整体作为一个热词），不要用空格分隔多个热词
 - 热词为"倾向性采纳"而非强制替换，建议精选 ≤512 字符的高频关键术语
 
 **暂不支持的参数：**
@@ -499,7 +500,7 @@ async def create_transcription(
     # 6. 兼容性参数（prompt 已支持热词，其余暂不支持）
     prompt: Optional[str] = Form(
         None,
-        description="热词/上下文提示（与 ASR_DEFAULT_HOTWORDS 预设热词合并后注入识别上下文，≤512 字符）",
+        description="热词/上下文提示（英文逗号分隔，与 ASR_DEFAULT_HOTWORDS 预设热词合并后注入识别上下文，≤512 字符）",
         max_length=512,
     ),
     temperature: Optional[float] = Form(0, description="采样温度（暂不支持，保留兼容）"),  # noqa: ARG001

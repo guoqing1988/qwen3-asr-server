@@ -29,7 +29,7 @@
 
 - `Settings` 新增类属性 `ASR_DEFAULT_HOTWORDS: str = ""`（注释：服务端预设热词，与请求热词合并后注入识别上下文）
 - `_load_from_env()` 中读取：`self.ASR_DEFAULT_HOTWORDS = (os.getenv("ASR_DEFAULT_HOTWORDS") or "").strip()`，与 `API_KEY` 处理风格一致
-- `.env.example` 新增注释段：说明变量用途、建议 ≤512 字符、示例（如 `阿里巴巴 腾讯 OpenAI Kubernetes`）
+- `.env.example` 新增注释段：说明变量用途、建议 ≤512 字符、示例（如 `阿里巴巴,Tencent,OpenAI,Kubernetes,Bank of China`）
 
 ### 2. 合并函数（app/services/asr/offline_transcription_service.py）
 
@@ -39,12 +39,14 @@
 def merge_hotwords(default: str, request: str) -> str:
     """合并默认热词与请求热词。
 
-    按空白分词、精确匹配去重（大小写敏感，避免破坏英文写法）、保持顺序（默认在前、请求在后）。
+    按英文逗号切分（短语内部空格保留，如 "Bank of China" 整体作为一个热词）、
+    精确匹配去重（大小写敏感，避免破坏英文写法）、保持顺序（默认在前、请求在后）。
     """
 ```
 
+- 分隔：仅按英文逗号切分（2026-08-13 与用户确认，替代原空白分词方案），短语内部空格保留
 - 顺序：默认词在前、请求词在后
-- 去重：精确匹配（`Kubernetes` 与 `kubernetes` 视为不同词）
+- 去重：精确匹配（`Kubernetes` 与 `kubernetes` 视为不同词）；空项丢弃
 - 任一参数为空均正常返回；不抛异常
 - 合并结果不做硬截断（请求侧 `prompt` 限 512、预设值建议 ≤512，模型上下文窗口足够容纳）
 
