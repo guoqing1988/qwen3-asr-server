@@ -496,7 +496,7 @@ async def create_transcription(
         description="输出格式",
         examples=["verbose_json", "json", "text", "srt", "vtt"],
     ),
-    # 6. 兼容性参数（暂不支持）
+    # 6. 兼容性参数（prompt 已支持热词，其余暂不支持）
     prompt: Optional[str] = Form(
         None,
         description="热词/上下文提示（与 ASR_DEFAULT_HOTWORDS 预设热词合并后注入识别上下文，≤512 字符）",

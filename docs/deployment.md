@@ -458,6 +458,16 @@ ASR 转写结果中匹配到的 `speaker_id` 会自动替换为注册名；未�
 确定的说话人保留原始标签。接口与匹配策略详见
 [voiceprint-architecture.md](voiceprint-architecture.md)。
 
+### 热词上下文配置
+
+| 环境变量 | 默认值 | 说明 |
+|----------|--------|------|
+| `ASR_DEFAULT_HOTWORDS` | （空） | 服务端预设热词，与请求热词（OpenAI `prompt` / 原生 `vocabulary_id`）合并后注入识别上下文；建议 ≤512 字符 |
+
+热词为"倾向性采纳"而非强制替换，建议只收录高频关键术语（公司名、行业专有名词、
+英文缩写等），过长列表会稀释效果。修改 `.env` 后需 systemd **stop → start**
+才会重读（`restart` 不重读 `.env`）。
+
 ## 服务监控
 
 ### 健康检查
