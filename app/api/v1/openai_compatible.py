@@ -409,8 +409,12 @@ def _get_transcription_description() -> str:
 - 通过 `QWEN3_ASR_MODEL` 控制服务端模型型号
 - `/v1/models` 仍可用于查看当前服务端实际在线模型
 
+**热词上下文：**
+- `prompt` 可传公司/行业专有名词（如 `阿里巴巴 OpenAI Kubernetes`），与 `ASR_DEFAULT_HOTWORDS` 预设热词合并后注入识别上下文，改善专有名词与英文短语识别
+- 热词为"倾向性采纳"而非强制替换，建议精选 ≤512 字符的高频关键术语
+
 **暂不支持的参数：**
-`prompt`、`temperature`、`timestamp_granularities` 参数已保留但暂不生效
+`temperature`、`timestamp_granularities` 参数已保留但暂不生效
 """
 
 
@@ -493,7 +497,11 @@ async def create_transcription(
         examples=["verbose_json", "json", "text", "srt", "vtt"],
     ),
     # 6. 兼容性参数（暂不支持）
-    prompt: Optional[str] = Form(None, description="提示文本（暂不支持，保留兼容）"),  # noqa: ARG001
+    prompt: Optional[str] = Form(
+        None,
+        description="热词/上下文提示（与 ASR_DEFAULT_HOTWORDS 预设热词合并后注入识别上下文，≤512 字符）",
+        max_length=512,
+    ),
     temperature: Optional[float] = Form(0, description="采样温度（暂不支持，保留兼容）"),  # noqa: ARG001
     timestamp_granularities: Optional[List[str]] = Form(  # noqa: ARG001
         None,
@@ -503,7 +511,7 @@ async def create_transcription(
 ):
     """音频转写 API (OpenAI Audio API 兼容)"""
     # 标记暂不支持的参数（保留以兼容 OpenAI API）
-    _ = (prompt, temperature, timestamp_granularities)
+    _ = (temperature, timestamp_granularities)
 
     prepared_audio: Optional[PreparedAudio] = None
     response_cleanup_managed = False
@@ -558,6 +566,7 @@ async def create_transcription(
             prepared_audio,
             OfflineTranscriptionOptions(
                 sample_rate=16000,
+                hotwords=prompt or "",
                 enable_speaker_diarization=enable_speaker_diarization,
                 word_timestamps=word_timestamps,
             ),

@@ -103,5 +103,63 @@ class ServiceHotwordsMergeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "阿里巴巴 腾讯")
 
 
+def _make_wav_bytes(duration_sec: float) -> bytes:
+    """生成 16kHz 单声道正弦 WAV 音频字节（供 TestClient 上传）。"""
+    import io
+    import math
+    import struct
+    import wave
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        frames = bytearray()
+        for i in range(int(16000 * duration_sec)):
+            sample = int(32767 * 0.3 * math.sin(2 * math.pi * 440 * i / 16000))
+            frames += struct.pack("<h", sample)
+        wav.writeframes(bytes(frames))
+    return buf.getvalue()
+
+
+class OpenAIEndpointHotwordsTest(unittest.TestCase):
+    """OpenAI 接口接线：prompt 表单参数流入 OfflineTranscriptionOptions.hotwords。"""
+
+    def test_prompt_flows_into_hotwords(self) -> None:
+        from fastapi.testclient import TestClient
+
+        from app.core.config import settings
+        from app.main import app
+        from app.services.asr.engines import ASRFullResult
+        from app.services.asr.offline_transcription_service import (
+            get_offline_transcription_service,
+        )
+
+        captured: dict[str, object] = {}
+
+        async def fake_transcribe(prepared_audio, options):
+            captured["options"] = options
+            return ASRFullResult(text="测试", segments=[], duration=1.0)
+
+        service = get_offline_transcription_service()
+        with (
+            mock.patch.object(service, "transcribe", new=fake_transcribe),
+            mock.patch.object(settings, "API_KEY", None),
+        ):
+            # 不用 with 包裹 TestClient，避免触发 lifespan（会预加载引擎）
+            client = TestClient(app)
+            response = client.post(
+                "/v1/audio/transcriptions",
+                files={"file": ("test.wav", _make_wav_bytes(0.5), "audio/wav")},
+                data={"response_format": "text", "prompt": "阿里巴巴 OpenAI"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.text, "测试")
+        options = captured["options"]
+        self.assertEqual(options.hotwords, "阿里巴巴 OpenAI")
+
+
 if __name__ == "__main__":
     unittest.main()
