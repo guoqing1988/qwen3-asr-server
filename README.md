@@ -245,7 +245,7 @@ WebSocket 端点（见下文）：
 | 维度 | `/stream/v1/asr`（阿里云兼容） | `/v1/audio/transcriptions`（OpenAI 兼容） |
 |------|------------------------------|------------------------------------------|
 | 输入方式 | 请求体原始音频（octet-stream）或 `audio_address` URL；不支持 multipart 上传 | `file` 文件上传 或 `audio_address` URL |
-| 热词 | ✅ `vocabulary_id` | `prompt`（保留字段） |
+| 热词 | ✅ `vocabulary_id` | ✅ `prompt`（与预设热词合并） |
 | 语言指定 | 自动检测 | ✅ `language` 参数 |
 | 响应格式 | 固定阿里云 JSON（`task_id`/`status`/`result`/`processing_time`） | `json` / `text` / `srt` / `vtt` / `verbose_json` |
 | 适合场景 | 阿里云 NLS 老客户端迁移（热词、协议一致） | OpenAI 生态（OpenAI SDK、字幕输出） |
@@ -267,7 +267,7 @@ WebSocket 端点（见下文）：
 | `enable_speaker_diarization` | bool   | `true`              | 启用说话人分离                        |
 | `word_timestamps`            | bool   | `false`             | 返回后端支持的字词级时间戳；Qwen CUDA vLLM 与 CPU Rust 在启用时会自动调用 forced aligner |
 | `response_format`            | string | `verbose_json`      | 输出格式                              |
-| `prompt`                     | string | -                     | 提示文本（保留兼容）                  |
+| `prompt`                     | string | 可选                  | 热词/上下文提示（≤512 字符），与 `ASR_DEFAULT_HOTWORDS` 预设热词合并后注入识别上下文 |
 | `temperature`                | float  | `0`                   | 采样温度（保留兼容）                  |
 
 **音频/视频输入方式:**
@@ -322,7 +322,7 @@ curl -X POST "http://localhost:9101/v1/audio/transcriptions" \
 | `sample_rate`                | int    | `16000`          | 采样率                                |
 | `enable_speaker_diarization` | bool   | `true`           | 启用说话人分离                        |
 | `word_timestamps`            | bool   | `false`          | 返回后端支持的字词级时间戳；Qwen CUDA vLLM 与 CPU Rust 在启用时会自动调用 forced aligner |
-| `vocabulary_id`              | string | -                  | 无权重热词上下文（如：`词1 词2`）。**Deprecated：** 数字权重不受支持，传入时会被忽略。 |
+| `vocabulary_id`              | string | -                  | 无权重热词上下文（如：`词1 词2`），与 `ASR_DEFAULT_HOTWORDS` 预设热词合并生效；未传时用预设热词兜底。**Deprecated：** 数字权重不受支持，传入时会被忽略。 |
 
 **使用示例:**
 
@@ -639,6 +639,7 @@ curl -X DELETE 'http://localhost:9101/api/v1/voiceprint-speakers/{speaker_id}'
 | `QWEN_GPU_MEMORY_UTILIZATION` | 自动计算 | 主 ASR 模型的 vLLM 显存利用率（0.0-1.0）。默认按 `12GB / 总显存` 自动计算；调低可减少常驻显存 |
 | `QWEN_FORCE_ALIGNER_GPU_MEMORY_UTILIZATION` | 继承主模型 | forced aligner（词级时间戳）vLLM 实例的显存利用率（0.0-1.0） |
 | `QWEN_IDLE_UNLOAD_TIMEOUT` | `300` | 无请求超过该秒数后卸载 vLLM 引擎释放显存；`0` 禁用空闲卸载 |
+| `ASR_DEFAULT_HOTWORDS` | （空） | 服务端预设热词（空格分隔，建议 ≤512 字符），与请求热词（OpenAI `prompt` / 原生 `vocabulary_id`）合并后注入识别上下文；热词为倾向性采纳而非强制替换 |
 | `VOICEPRINT_ENABLED` | `true` | 是否启用 ASR 结果声纹身份匹配 |
 | `VOICEPRINT_DB_PATH` | `./data/voiceprints.sqlite3` | SQLite + sqlite-vec 声纹数据库路径 |
 | `VOICEPRINT_MATCH_THRESHOLD` | `0.70` | 说话人身份匹配阈值 |

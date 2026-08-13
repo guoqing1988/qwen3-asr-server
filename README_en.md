@@ -246,7 +246,7 @@ word-level timestamps. True streaming lives on the WebSocket endpoints below:
 | Aspect | `/stream/v1/asr` (Alibaba Cloud compatible) | `/v1/audio/transcriptions` (OpenAI compatible) |
 |--------|---------------------------------------------|-------------------------------------------------|
 | Input | Raw audio body (octet-stream) or `audio_address` URL; no multipart upload | `file` upload or `audio_address` URL |
-| Hotwords | ✅ `vocabulary_id` | `prompt` (reserved) |
+| Hotwords | ✅ `vocabulary_id` | ✅ `prompt` (merged with preset) |
 | Language | Auto-detected | ✅ `language` parameter |
 | Response | Fixed Alibaba Cloud JSON (`task_id`/`status`/`result`/`processing_time`) | `json` / `text` / `srt` / `vtt` / `verbose_json` |
 | Best for | Migrating Alibaba NLS clients (hotwords, same protocol) | OpenAI ecosystem (SDK, subtitle output) |
@@ -268,7 +268,7 @@ word-level timestamps. True streaming lives on the WebSocket endpoints below:
 | `enable_speaker_diarization` | bool | `true` | Enable speaker diarization |
 | `word_timestamps` | bool | `false` | Return word-level timestamps when the backend supports them. Qwen CUDA vLLM and CPU Rust automatically use the forced aligner when enabled. |
 | `response_format` | string | `verbose_json` | Output format |
-| `prompt` | string | - | Prompt text (reserved) |
+| `prompt` | string | optional | Hotword context (≤512 chars), merged with the `ASR_DEFAULT_HOTWORDS` preset before being injected into the recognition context |
 | `temperature` | float | `0` | Sampling temperature (reserved) |
 
 **Audio / Video Input Methods:**
@@ -323,7 +323,7 @@ curl -X POST "http://localhost:9101/v1/audio/transcriptions" \
 | `sample_rate` | int | `16000` | Sample rate |
 | `enable_speaker_diarization` | bool | `true` | Enable speaker diarization |
 | `word_timestamps` | bool | `false` | Return word-level timestamps when the backend supports them. Qwen CUDA vLLM and CPU Rust automatically use the forced aligner when enabled. |
-| `vocabulary_id` | string | - | Hotword context (for example: `word1 word2`). **Deprecated:** numeric weights are unsupported and ignored. |
+| `vocabulary_id` | string | - | Hotword context (for example: `word1 word2`), merged with the `ASR_DEFAULT_HOTWORDS` preset; falls back to the preset when omitted. **Deprecated:** numeric weights are unsupported and ignored. |
 
 **Usage Examples:**
 
@@ -655,6 +655,7 @@ Settings in `.env.example`:
 | `QWEN_GPU_MEMORY_UTILIZATION` | auto | vLLM GPU memory utilization (0.0-1.0) for the main ASR model. Default is auto-calculated as `12GB / total VRAM`; lower it to reduce resident VRAM |
 | `QWEN_FORCE_ALIGNER_GPU_MEMORY_UTILIZATION` | inherits | GPU memory utilization for the forced aligner vLLM instance (0.0-1.0) |
 | `QWEN_IDLE_UNLOAD_TIMEOUT` | `300` | Unload vLLM engines to release VRAM after this many seconds without requests; `0` disables idle unload |
+| `ASR_DEFAULT_HOTWORDS` | (empty) | Server-side preset hotwords (space-separated, recommended ≤512 chars), merged with request hotwords (OpenAI `prompt` / native `vocabulary_id`) before being injected into the recognition context; hotwords are adopted preferentially, not forced |
 | `VOICEPRINT_ENABLED` | `true` | Enable voiceprint identity matching in ASR results |
 | `VOICEPRINT_DB_PATH` | `./data/voiceprints.sqlite3` | SQLite + sqlite-vec voiceprint database path |
 | `VOICEPRINT_MATCH_THRESHOLD` | `0.70` | Speaker identity match threshold |
