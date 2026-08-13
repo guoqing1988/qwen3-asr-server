@@ -111,7 +111,7 @@ class OfflineTranscriptionService:
             OfflineASRRequest(
                 model_id=model_id,
                 audio_path=prepared_audio.normalized_path,
-                hotwords=options.hotwords,
+                hotwords=merge_hotwords(settings.ASR_DEFAULT_HOTWORDS, options.hotwords),
                 enable_punctuation=True,
                 enable_itn=True,
                 sample_rate=options.sample_rate or int(SampleRate.RATE_16000),

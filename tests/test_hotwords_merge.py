@@ -55,5 +55,53 @@ class SettingsDefaultHotwordsTest(unittest.TestCase):
             self.assertEqual(Settings().ASR_DEFAULT_HOTWORDS, "")
 
 
+class ServiceHotwordsMergeTest(unittest.IsolatedAsyncioTestCase):
+    """服务层转写：默认热词与请求热词合并后传给路由。"""
+
+    async def _run_transcribe(self, default: str, request: str) -> str:
+        from app.core.config import settings
+        from app.services.asr.engines import ASRFullResult
+        from app.services.asr.offline_transcription_service import (
+            OfflineTranscriptionOptions,
+            OfflineTranscriptionService,
+            PreparedAudio,
+        )
+        from app.services.asr.runtime import get_runtime_router
+
+        captured: dict[str, object] = {}
+
+        async def fake_run_offline(asr_request):
+            captured["hotwords"] = asr_request.hotwords
+            return ASRFullResult(text="ok", segments=[], duration=0.0)
+
+        router = get_runtime_router()
+        service = OfflineTranscriptionService()
+        audio = PreparedAudio(
+            normalized_path="/tmp/fake.wav",
+            duration=1.0,
+            original_path="/tmp/fake.wav",
+        )
+        options = OfflineTranscriptionOptions(hotwords=request)
+        with (
+            mock.patch.object(router, "run_offline", new=fake_run_offline),
+            mock.patch.object(settings, "ASR_DEFAULT_HOTWORDS", default),
+            mock.patch.object(settings, "VOICEPRINT_ENABLED", False),
+        ):
+            await service.transcribe(audio, options)
+        return str(captured["hotwords"])
+
+    async def test_default_plus_request_merged(self) -> None:
+        result = await self._run_transcribe("阿里巴巴 腾讯", "OpenAI")
+        self.assertEqual(result, "阿里巴巴 腾讯 OpenAI")
+
+    async def test_no_default_uses_request(self) -> None:
+        result = await self._run_transcribe("", "OpenAI Kubernetes")
+        self.assertEqual(result, "OpenAI Kubernetes")
+
+    async def test_no_request_uses_default(self) -> None:
+        result = await self._run_transcribe("阿里巴巴 腾讯", "")
+        self.assertEqual(result, "阿里巴巴 腾讯")
+
+
 if __name__ == "__main__":
     unittest.main()
