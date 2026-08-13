@@ -24,16 +24,17 @@ logger = logging.getLogger(__name__)
 def merge_hotwords(default: str, request: str) -> str:
     """合并默认热词与请求热词。
 
-    按空白分词、精确匹配去重（大小写敏感，避免破坏英文写法）、
-    保持顺序（默认在前、请求在后）。
+    按英文逗号切分（短语内部空格保留，如 "Bank of China" 整体作为一个热词）、
+    精确匹配去重（大小写敏感，避免破坏英文写法）、保持顺序（默认在前、请求在后）。
     """
     seen: set[str] = set()
     merged: list[str] = []
-    for word in f"{default} {request}".split():
-        if word not in seen:
+    for item in f"{default},{request}".split(","):
+        word = item.strip()
+        if word and word not in seen:
             seen.add(word)
             merged.append(word)
-    return " ".join(merged)
+    return ", ".join(merged)
 
 
 @dataclass(frozen=True)

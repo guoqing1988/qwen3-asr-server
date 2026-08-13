@@ -15,28 +15,37 @@ class MergeHotwordsTest(unittest.TestCase):
         self.assertEqual(merge_hotwords("", ""), "")
 
     def test_default_only(self) -> None:
-        self.assertEqual(merge_hotwords("阿里巴巴 腾讯", ""), "阿里巴巴 腾讯")
+        self.assertEqual(merge_hotwords("阿里巴巴,腾讯", ""), "阿里巴巴, 腾讯")
 
     def test_request_only(self) -> None:
-        self.assertEqual(merge_hotwords("", "OpenAI Kubernetes"), "OpenAI Kubernetes")
+        self.assertEqual(merge_hotwords("", "OpenAI,Kubernetes"), "OpenAI, Kubernetes")
 
     def test_merge_order_default_first(self) -> None:
-        result = merge_hotwords("阿里巴巴 腾讯", "OpenAI")
-        self.assertEqual(result, "阿里巴巴 腾讯 OpenAI")
+        result = merge_hotwords("阿里巴巴,腾讯", "OpenAI")
+        self.assertEqual(result, "阿里巴巴, 腾讯, OpenAI")
 
     def test_dedup_exact_match(self) -> None:
         # 请求词与默认词重复时只保留首次出现（默认在前）
-        result = merge_hotwords("阿里巴巴 OpenAI", "OpenAI 腾讯")
-        self.assertEqual(result, "阿里巴巴 OpenAI 腾讯")
+        result = merge_hotwords("阿里巴巴,OpenAI", "OpenAI,腾讯")
+        self.assertEqual(result, "阿里巴巴, OpenAI, 腾讯")
 
     def test_dedup_case_sensitive(self) -> None:
         # 大小写敏感：Kubernetes 与 kubernetes 是不同词，避免破坏英文写法
         result = merge_hotwords("Kubernetes", "kubernetes")
-        self.assertEqual(result, "Kubernetes kubernetes")
+        self.assertEqual(result, "Kubernetes, kubernetes")
 
     def test_whitespace_cleaning(self) -> None:
-        result = merge_hotwords("  阿里巴巴   腾讯  ", "  OpenAI   ")
-        self.assertEqual(result, "阿里巴巴 腾讯 OpenAI")
+        result = merge_hotwords("  阿里巴巴 ,  腾讯  ", " OpenAI  ")
+        self.assertEqual(result, "阿里巴巴, 腾讯, OpenAI")
+
+    def test_phrase_with_internal_spaces_preserved(self) -> None:
+        # 多词短语整体保留：仅按逗号切分，短语内空格不拆分
+        result = merge_hotwords("Bank of China", "OpenAI")
+        self.assertEqual(result, "Bank of China, OpenAI")
+
+    def test_empty_items_skipped(self) -> None:
+        result = merge_hotwords("阿里巴巴,,腾讯,", "")
+        self.assertEqual(result, "阿里巴巴, 腾讯")
 
 
 class SettingsDefaultHotwordsTest(unittest.TestCase):
@@ -91,16 +100,16 @@ class ServiceHotwordsMergeTest(unittest.IsolatedAsyncioTestCase):
         return str(captured["hotwords"])
 
     async def test_default_plus_request_merged(self) -> None:
-        result = await self._run_transcribe("阿里巴巴 腾讯", "OpenAI")
-        self.assertEqual(result, "阿里巴巴 腾讯 OpenAI")
+        result = await self._run_transcribe("阿里巴巴,腾讯", "OpenAI")
+        self.assertEqual(result, "阿里巴巴, 腾讯, OpenAI")
 
     async def test_no_default_uses_request(self) -> None:
-        result = await self._run_transcribe("", "OpenAI Kubernetes")
-        self.assertEqual(result, "OpenAI Kubernetes")
+        result = await self._run_transcribe("", "OpenAI,Kubernetes")
+        self.assertEqual(result, "OpenAI, Kubernetes")
 
     async def test_no_request_uses_default(self) -> None:
-        result = await self._run_transcribe("阿里巴巴 腾讯", "")
-        self.assertEqual(result, "阿里巴巴 腾讯")
+        result = await self._run_transcribe("阿里巴巴,腾讯", "")
+        self.assertEqual(result, "阿里巴巴, 腾讯")
 
 
 def _make_wav_bytes(duration_sec: float) -> bytes:
@@ -152,13 +161,13 @@ class OpenAIEndpointHotwordsTest(unittest.TestCase):
             response = client.post(
                 "/v1/audio/transcriptions",
                 files={"file": ("test.wav", _make_wav_bytes(0.5), "audio/wav")},
-                data={"response_format": "text", "prompt": "阿里巴巴 OpenAI"},
+                data={"response_format": "text", "prompt": "阿里巴巴,OpenAI"},
             )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.text, "测试")
         options = captured["options"]
-        self.assertEqual(options.hotwords, "阿里巴巴 OpenAI")
+        self.assertEqual(options.hotwords, "阿里巴巴,OpenAI")
 
 
 if __name__ == "__main__":
