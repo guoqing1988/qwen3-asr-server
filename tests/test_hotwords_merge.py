@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """merge_hotwords 纯函数与服务层/接口层热词接线测试。"""
 
+import os
 import unittest
+from unittest import mock
 
 from app.services.asr.offline_transcription_service import merge_hotwords
 
@@ -35,6 +37,22 @@ class MergeHotwordsTest(unittest.TestCase):
     def test_whitespace_cleaning(self) -> None:
         result = merge_hotwords("  阿里巴巴   腾讯  ", "  OpenAI   ")
         self.assertEqual(result, "阿里巴巴 腾讯 OpenAI")
+
+
+class SettingsDefaultHotwordsTest(unittest.TestCase):
+    """ASR_DEFAULT_HOTWORDS 环境变量解析测试。"""
+
+    def test_load_from_env_strips(self) -> None:
+        from app.core.config import Settings
+
+        with mock.patch.dict(os.environ, {"ASR_DEFAULT_HOTWORDS": "  阿里巴巴  腾讯  "}):
+            self.assertEqual(Settings().ASR_DEFAULT_HOTWORDS, "阿里巴巴  腾讯")
+
+    def test_default_is_empty_string(self) -> None:
+        from app.core.config import Settings
+
+        with mock.patch.dict(os.environ, {"ASR_DEFAULT_HOTWORDS": ""}):
+            self.assertEqual(Settings().ASR_DEFAULT_HOTWORDS, "")
 
 
 if __name__ == "__main__":

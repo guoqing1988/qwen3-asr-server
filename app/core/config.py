@@ -66,6 +66,9 @@ class Settings:
     # 批处理推理配置（GPU 真并行）
     ASR_BATCH_SIZE: int = 4  # ASR 批处理大小（同时推理的片段数），建议 2-8
 
+    # 服务端预设热词（与请求热词合并后注入识别上下文；建议 ≤512 字符）
+    ASR_DEFAULT_HOTWORDS: str = ""
+
     # 音频分段配置
     MAX_SEGMENT_SEC: float = 60.0  # Max offline ASR segment duration in seconds.
 
@@ -126,6 +129,10 @@ class Settings:
         self.ASR_BATCH_SIZE = int(
             os.getenv("ASR_BATCH_SIZE", str(self.ASR_BATCH_SIZE))
         )
+
+        self.ASR_DEFAULT_HOTWORDS = (
+            os.getenv("ASR_DEFAULT_HOTWORDS") or ""
+        ).strip()
 
         self.MAX_SEGMENT_SEC = float(
             os.getenv("MAX_SEGMENT_SEC", str(self.MAX_SEGMENT_SEC))
