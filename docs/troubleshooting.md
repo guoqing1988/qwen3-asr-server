@@ -149,3 +149,63 @@ sudo chown -R $(whoami):$(whoami) /data/www/qwen3-asr/data/
 sudo systemctl reset-failed qwen3-asr
 sudo systemctl start qwen3-asr
 ```
+
+## 2026-08-13：vLLM 引擎启动失败（bad marshal data，pyc 缓存损坏）
+
+### 现象
+
+- 引擎空闲卸载后懒加载失败，或重启后预加载失败：日志出现
+  `EngineCore failed to start` + `ValueError: bad marshal data (unknown type code)`，
+  回溯指向 `importlib._bootstrap_external._compile_bytecode`
+- 转写请求返回空响应（流式响应已发出心跳后中断：`Caught handled exception, but response already started`）
+- 该错误与早期 Docker 部署时遇到的同类错误一致（当时未能解决，是迁移到本地部署的原因之一）
+
+### 排查
+
+```bash
+# 1. 用全新进程复现导入失败，定位损坏模块
+cd /data/www/qwen3-asr
+.venv/bin/python -c "from vllm._aiter_ops import rocm_aiter_ops"   # → bad marshal data
+
+# 2. 检查 pyc 文件时间戳（ctime=mtime 说明文件自生成后未变，损坏发生在写入时）
+stat -c '%y %z' .venv/lib/python3.12/site-packages/vllm/__pycache__/_aiter_ops.cpython-312.pyc
+
+# 3. 批量体检 vllm 包全部 pyc（输出损坏文件列表）
+.venv/bin/python -c "
+import marshal, os
+for dp, _, fns in os.walk('.venv/lib/python3.12/site-packages/vllm'):
+    for fn in fns:
+        if fn.endswith('.pyc'):
+            p = os.path.join(dp, fn)
+            try: marshal.loads(open(p, 'rb').read()[16:])
+            except Exception as e: print(p, e)
+"
+```
+
+### 根因
+
+`.pyc` 字节码缓存写入时被中断（进程被杀、并发编译冲突，或容器构建/文件拷贝期间编译）
+导致正文损坏，而文件头部（magic/时间戳/大小）完好，导入时通过头部校验后才在
+marshal 解析处报错。
+
+### 解决
+
+用完好源码重新编译覆盖损坏的 pyc（不删除文件），然后重启服务验证：
+
+```bash
+.venv/bin/python -c "
+import py_compile
+py_compile.compile(
+    '.venv/lib/python3.12/site-packages/vllm/_aiter_ops.py',
+    cfile='.venv/lib/python3.12/site-packages/vllm/__pycache__/_aiter_ops.cpython-312.pyc',
+    doraise=True,
+)
+"
+# 验证导入通过后再重启
+.venv/bin/python -c "from vllm._aiter_ops import rocm_aiter_ops"
+sudo systemctl restart qwen3-asr
+```
+
+也可直接删除损坏的 pyc（导入时自动从源码重建，效果相同）。若损坏面较大，
+可对整个包清理缓存：`find .venv -name '__pycache__' -type d -exec rm -rf {} +`
+（缓存会自动重建，无数据损失）。
