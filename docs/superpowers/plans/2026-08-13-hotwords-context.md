@@ -40,8 +40,6 @@
 # -*- coding: utf-8 -*-
 """merge_hotwords 纯函数与服务层/接口层热词接线测试。"""
 
-from __future__ import annotations
-
 import unittest
 
 from app.services.asr.offline_transcription_service import merge_hotwords
