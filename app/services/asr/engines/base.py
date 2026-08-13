@@ -135,7 +135,8 @@ class BaseASREngine(ABC):
 
         logger.info(
             f"{task_prefix}[transcribe_long_audio] 音频: {audio_path}, "
-            f"speaker_diarization={enable_speaker_diarization}, word_level={word_timestamps}"
+            f"speaker_diarization={enable_speaker_diarization}, word_level={word_timestamps}, "
+            f"hotwords={hotwords or '(空)'}"
         )
 
         try:
