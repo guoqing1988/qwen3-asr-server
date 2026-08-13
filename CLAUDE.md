@@ -7,7 +7,7 @@ Qwen3-ASR 服务（GPU 版）：Qwen3-ASR-1.7B（vLLM）+ FunASR 实时流式 + 
 ### 本地 systemd 部署（当前生产环境）
 
 - **启动**：`sudo systemctl start qwen3-asr`
-- **重启**：`sudo systemctl restart qwen3-asr`（代码修改后即时生效，不重读 `.env`）
+- **重启**：`sudo systemctl restart qwen3-asr`（代码修改即时生效；`start.py` 每次启动都执行 `load_dotenv()`，`.env` 修改也随重启生效，2026-08-13 实测验证）
 - **停止**：`sudo systemctl stop qwen3-asr`
 - **日志**：`sudo journalctl -u qwen3-asr -f`
 - **状态**：`sudo systemctl status qwen3-asr`
