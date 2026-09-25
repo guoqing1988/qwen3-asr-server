@@ -226,12 +226,15 @@ def _build_huggingface_spec(
     *,
     min_total_size_bytes: int,
     alternative_required_patterns: tuple[tuple[str, ...], ...] = (),
+    local_dir: str | None = None,
 ) -> ModelIntegritySpec:
     from app.infrastructure import get_huggingface_model_cache_dir
 
+    # 本地目录模型直接校验该目录；HF 引用则校验对应缓存目录
+    spec_path = Path(local_dir) if local_dir else get_huggingface_model_cache_dir(model_id)
     return ModelIntegritySpec(
         description=description,
-        path=get_huggingface_model_cache_dir(model_id),
+        path=spec_path,
         required_patterns=required_patterns,
         alternative_required_patterns=alternative_required_patterns,
         min_total_size_bytes=min_total_size_bytes,
@@ -244,7 +247,9 @@ def _should_check_qwen_forced_aligner(
 ) -> bool:
     """Return True when startup integrity should require Qwen forced aligner files."""
     _ = (resolved_device, using_cpu_qwen_rust)
-    return True
+    from ..core.config import settings
+
+    return settings.QWEN_FORCED_ALIGNER_ENABLED
 
 
 def _build_required_model_integrity_specs() -> list[ModelIntegritySpec]:
@@ -292,6 +297,7 @@ def _build_required_model_integrity_specs() -> list[ModelIntegritySpec]:
                 asset.required_patterns,
                 alternative_required_patterns=asset.alternative_required_patterns,
                 min_total_size_bytes=asset.min_total_size_bytes,
+                local_dir=asset.local_dir,
             )
         )
 

@@ -1,18 +1,20 @@
 [Unit]
 Description=Qwen3-ASR Service
 After=network.target
+StartLimitBurst=3
+StartLimitIntervalSec=300
 
 [Service]
 Type=simple
-User=liu
-WorkingDirectory=/data/www/qwen3-asr
-Environment="CUDA_VISIBLE_DEVICES=0"
-Environment="DEVICE=cuda:0"
-ExecStart=/data/www/qwen3-asr/.venv/bin/python start.py
+User=ubuntu
+WorkingDirectory=/data1/www/qwen3-asr-server
+# GPU / DEVICE / 模型路径 / 显存 / 端口等全部运行时参数统一由 .env 驱动
+# （start.py 启动时 load_dotenv() 加载）；此处只保留进程级开关
+Environment="FUNASR_STARTUP_UI=0"
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/data1/www/qwen3-asr-server/.venv/bin/python start.py
 Restart=on-failure
 RestartSec=10
-StartLimitBurst=3
-StartLimitInterval=300s
 
 [Install]
 WantedBy=multi-user.target

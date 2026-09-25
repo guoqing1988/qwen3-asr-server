@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Literal, Optional
 
 from app.core.config import settings
+from app.infrastructure import resolve_local_model_dir
 from app.services.asr.manager import get_model_manager
 from app.services.asr.model_plan import get_active_qwen_model, get_runtime_model_ids
 
@@ -23,6 +24,47 @@ class ModelAsset:
     required_patterns: tuple[str, ...] = ()
     alternative_required_patterns: tuple[tuple[str, ...], ...] = ()
     min_total_size_bytes: int = 0
+    # 非空表示该模型已存在于本地目录（不经 HF 缓存 
+    # 结构，完整性检查与下载流程据此区分）
+    local_dir: Optional[str] = None
+
+
+def _build_huggingface_asset(
+    model_id: str,
+    description: str,
+    *,
+    min_total_size_bytes: int,
+) -> ModelAsset:
+    """构造 HuggingFace 资产声明，自动区分本地目录与 HF 缓存。"""
+    local_dir = resolve_local_model_dir(model_id)
+    if local_dir is not None:
+        return ModelAsset(
+            source="huggingface",
+            model_id=model_id,
+            description=description,
+            local_dir=str(local_dir),
+            required_patterns=("config.json",),
+            alternative_required_patterns=(
+                ("model.safetensors",),
+                ("model.safetensors.index.json", "model-*.safetensors"),
+            ),
+            min_total_size_bytes=min_total_size_bytes,
+        )
+
+    return ModelAsset(
+        source="huggingface",
+        model_id=model_id,
+        description=description,
+        required_patterns=("snapshots/*/config.json",),
+        alternative_required_patterns=(
+            ("snapshots/*/model.safetensors",),
+            (
+                "snapshots/*/model.safetensors.index.json",
+                "snapshots/*/model-*.safetensors",
+            ),
+        ),
+        min_total_size_bytes=min_total_size_bytes,
+    )
 
 
 _VAD_ASSETS = (
@@ -135,29 +177,18 @@ def get_enabled_qwen_huggingface_assets(
     offline_model = model_config.offline_model_path
     if offline_model:
         assets.append(
-            ModelAsset(
-                source="huggingface",
-                model_id=offline_model,
-                description=f"{model_config.name} Offline",
-                required_patterns=("snapshots/*/config.json",),
-                alternative_required_patterns=(
-                    ("snapshots/*/model.safetensors",),
-                    (
-                        "snapshots/*/model.safetensors.index.json",
-                        "snapshots/*/model-*.safetensors",
-                    ),
-                ),
+            _build_huggingface_asset(
+                offline_model,
+                f"{model_config.name} Offline",
                 min_total_size_bytes=500_000_000,
             )
         )
     forced_aligner = str(model_config.extra_kwargs.get("forced_aligner_path") or "").strip()
     if forced_aligner and include_forced_aligner:
         assets.append(
-            ModelAsset(
-                source="huggingface",
-                model_id=forced_aligner,
-                description=f"{model_config.name} Forced Aligner",
-                required_patterns=("snapshots/*/config.json", "snapshots/*/model.safetensors"),
+            _build_huggingface_asset(
+                forced_aligner,
+                f"{model_config.name} Forced Aligner",
                 min_total_size_bytes=500_000_000,
             )
         )

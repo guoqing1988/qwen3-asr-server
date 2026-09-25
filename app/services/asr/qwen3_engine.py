@@ -4,6 +4,7 @@
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Optional, List, Any
 from dataclasses import dataclass
 
@@ -22,37 +23,32 @@ from ...utils.text_processing import normalize_asr_text
 
 logger = logging.getLogger(__name__)
 
+# 显存自动估算参数（仅在模型未显式配置 gpu_memory_utilization、且无环境变量覆盖时生效）
+_VRAM_WEIGHTS_MULTIPLIER = 1.5
+_VRAM_HEADROOM_GB = 2.0
+_DEFAULT_VRAM_GB_WHEN_UNKNOWN = 10.0
 
-def calculate_gpu_memory_utilization(model_path: str) -> float:
+
+def calculate_gpu_memory_utilization(
+    model_path: str,
+    explicit_utilization: float | None = None,
+) -> float:
     """Calculate vLLM GPU memory utilization for the active model.
 
-    vLLM uses this ratio as an allocation budget, not just model weights.
-    Keep the observed requirement slightly above the bare minimum so KV cache
-    and profiling have enough room.
+    优先级（避免把模型信息写死在代码里）：
+    1. 显式传入的 ``explicit_utilization``（来自 settings 中的 .env 配置）
+    2. 按模型目录下 ``*.safetensors`` 实际大小估算（权重 × 系数 + 余量）
     """
-    # Check environment variable override first
-    env_override = os.getenv("QWEN_GPU_MEMORY_UTILIZATION")
-    if env_override:
-        try:
-            value = float(env_override)
-            if 0.0 < value <= 1.0:
-                logger.info(f"Using environment override: gpu_memory_utilization={value}")
-                return value
-            else:
-                logger.warning(f"Invalid QWEN_GPU_MEMORY_UTILIZATION={env_override}, must be 0.0-1.0")
-        except ValueError:
-            logger.warning(f"Invalid QWEN_GPU_MEMORY_UTILIZATION={env_override}, not a float")
-
-    model_memory_profiles = {
-        "0.6B": 8,
-        "1.7B": 12.0,
-    }
-
-    if "0.6B" in model_path:
-        model_size = "0.6B"
-    else:
-        model_size = "1.7B"
-    required_memory_gb = model_memory_profiles[model_size]
+    if explicit_utilization is not None:
+        if 0.0 < explicit_utilization <= 1.0:
+            logger.info(
+                "Using configured gpu_memory_utilization=%s", explicit_utilization
+            )
+            return explicit_utilization
+        logger.warning(
+            "Invalid configured gpu_memory_utilization=%s, must be 0.0-1.0",
+            explicit_utilization,
+        )
 
     try:
         if not torch.cuda.is_available():
@@ -60,12 +56,23 @@ def calculate_gpu_memory_utilization(model_path: str) -> float:
             return 0.5
 
         total_vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-        utilization = required_memory_gb / total_vram_gb
-        utilization = min(utilization, 0.95)
+        weights_gb = _estimate_model_weights_gb(model_path)
+        if weights_gb is None:
+            required_memory_gb = _DEFAULT_VRAM_GB_WHEN_UNKNOWN
+            logger.warning(
+                "Cannot estimate model weights for %s, using fallback budget %.1fGB",
+                model_path,
+                required_memory_gb,
+            )
+        else:
+            # 权重之外还需 KV cache / activation 空间，按系数加固定余量
+            required_memory_gb = weights_gb * _VRAM_WEIGHTS_MULTIPLIER + _VRAM_HEADROOM_GB
 
+        utilization = min(required_memory_gb / total_vram_gb, 0.95)
         logger.info(
-            "GPU memory calculation: model=%s, requires=%.1fGB, total_vram=%.1fGB, utilization=%.2f",
-            model_size,
+            "GPU memory calculation: model=%s, weights=%.2fGB, budget=%.1fGB, total_vram=%.1fGB, utilization=%.2f",
+            model_path,
+            weights_gb or 0.0,
             required_memory_gb,
             total_vram_gb,
             utilization,
@@ -83,6 +90,25 @@ def calculate_gpu_memory_utilization(model_path: str) -> float:
     except Exception as e:
         logger.error(f"Failed to detect VRAM: {e}, using fallback gpu_memory_utilization=0.5")
         return 0.5
+
+
+def _estimate_model_weights_gb(model_path: str) -> float | None:
+    """估算模型权重文件总大小（GB）；无法定位模型目录时返回 None。"""
+    try:
+        path = Path(model_path).expanduser()
+        if not path.is_dir():
+            from ...infrastructure import find_huggingface_snapshot_dir
+
+            resolved = find_huggingface_snapshot_dir(model_path)
+            if resolved is None:
+                return None
+            path = resolved
+        total_bytes = sum(
+            item.stat().st_size for item in path.glob("*.safetensors") if item.is_file()
+        )
+        return total_bytes / (1024**3) if total_bytes else None
+    except OSError:
+        return None
 
 
 def _handle_asr_error(operation: str):
@@ -126,12 +152,17 @@ class Qwen3ASREngine(BaseASREngine):
         max_inference_batch_size: int = 32,
         max_new_tokens: int = 1024,
         max_model_len: Optional[int] = None,
+        gpu_memory_utilization: float | None = None,
+        forced_aligner_gpu_memory_utilization: float | None = None,
+        warmup_forced_aligner: bool | None = None,
         **_kwargs,
     ):
         """Initialize Qwen3-ASR engine
 
         CUDA -> official vLLM backend
         CPU/macOS -> QwenASR Rust backend
+
+        显存与 aligner 预热策略均由配置传入，未传时回退到全局 settings。
         """
         from app.core.device import detect_device
 
@@ -142,6 +173,18 @@ class Qwen3ASREngine(BaseASREngine):
         self._device = detect_device(device)
         self.model_id = model_path
         self.model_path = model_path
+        self._gpu_memory_utilization_config = (
+            gpu_memory_utilization
+            if gpu_memory_utilization is not None
+            else settings.QWEN_GPU_MEMORY_UTILIZATION
+        )
+        # 显存类参数属于部署/运维配置，未显式传入时统一从 settings（.env）读取
+        self._forced_aligner_gpu_memory_utilization_config = (
+            forced_aligner_gpu_memory_utilization
+            if forced_aligner_gpu_memory_utilization is not None
+            else settings.QWEN_FORCE_ALIGNER_GPU_MEMORY_UTILIZATION
+        )
+        self._warmup_aligner_on_load = warmup_forced_aligner
         self._backend = self._select_backend()
         self._forced_aligner_path = forced_aligner_path
         self._rust_num_threads = 0
@@ -327,7 +370,20 @@ class Qwen3ASREngine(BaseASREngine):
         return output
 
     def _warmup_forced_aligner(self) -> None:
+        """按配置决定是否在加载时预热 forced aligner。
+
+        默认不预热：aligner 仅在请求 ``word_timestamps=true`` 时懒加载，
+        避免空闲时白占一份显存。
+        """
         if not self._forced_aligner_path:
+            return
+        warmup = self._warmup_aligner_on_load
+        if warmup is None:
+            warmup = settings.QWEN_WARMUP_FORCED_ALIGNER
+        if not warmup:
+            logger.info(
+                "Forced aligner warmup disabled; it will load lazily on word_timestamps request"
+            )
             return
         if self._backend == "vllm":
             self.model.ensure_forced_aligner_loaded()
@@ -338,18 +394,31 @@ class Qwen3ASREngine(BaseASREngine):
         max_model_len: Optional[int],
     ) -> Qwen3VLLMBackend:
         """Load model via official vLLM backend (CUDA only)."""
-        gpu_memory_utilization = calculate_gpu_memory_utilization(model_path)
+        gpu_memory_utilization = calculate_gpu_memory_utilization(
+            model_path,
+            explicit_utilization=self._gpu_memory_utilization_config,
+        )
+        # vLLM 运行时调优参数（并发/显存），统一从 .env 经 settings 读取
+        effective_max_model_len = settings.QWEN_MAX_MODEL_LEN or max_model_len
         logger.info(
             f"Loading Qwen3-ASR (official vLLM): {model_path}, "
-            f"device={self._device}, gpu_memory_utilization={gpu_memory_utilization}"
+            f"device={self._device}, gpu_memory_utilization={gpu_memory_utilization}, "
+            f"max_model_len={effective_max_model_len}, max_num_seqs={settings.QWEN_MAX_NUM_SEQS}, "
+            f"enforce_eager={settings.QWEN_ENFORCE_EAGER}"
         )
         return Qwen3VLLMBackend(
             model_path=model_path,
             forced_aligner_path=forced_aligner_path,
             gpu_memory_utilization=gpu_memory_utilization,
+            forced_aligner_gpu_memory_utilization=self._forced_aligner_gpu_memory_utilization_config,
             max_inference_batch_size=max_inference_batch_size,
             max_new_tokens=max_new_tokens,
-            max_model_len=max_model_len,
+            max_model_len=effective_max_model_len,
+            max_num_seqs=settings.QWEN_MAX_NUM_SEQS,
+            max_num_batched_tokens=settings.QWEN_MAX_NUM_BATCHED_TOKENS,
+            enforce_eager=settings.QWEN_ENFORCE_EAGER,
+            kv_cache_memory_bytes=settings.QWEN_KV_CACHE_MEMORY_BYTES,
+            forced_aligner_max_model_len=settings.QWEN_FORCE_ALIGNER_MAX_MODEL_LEN,
         )
 
     @_handle_asr_error("转写")
@@ -516,7 +585,9 @@ class Qwen3ASREngine(BaseASREngine):
             chunk_size_sec = float(kwargs.get("chunk_size_sec", 2.0))
             unfixed_chunk_num = int(kwargs.get("unfixed_chunk_num", 2))
             unfixed_token_num = int(kwargs.get("unfixed_token_num", 5))
-            max_new_tokens = int(kwargs.get("max_new_tokens", 32))
+            max_new_tokens = int(
+                kwargs.get("max_new_tokens") or settings.QWEN_STREAM_MAX_NEW_TOKENS
+            )
             stream_handle = self.model.create_stream(
                 chunk_size_sec=chunk_size_sec,
                 unfixed_chunk_num=unfixed_chunk_num,
@@ -536,13 +607,16 @@ class Qwen3ASREngine(BaseASREngine):
                 last_language=language or "",
             )
         if self._backend == "vllm":
+            # 未显式指定时使用配置默认值（.env: QWEN_STREAM_MAX_NEW_TOKENS）
+            if kwargs.get("max_new_tokens") in (None, ""):
+                kwargs["max_new_tokens"] = settings.QWEN_STREAM_MAX_NEW_TOKENS
             streaming_state = self.model.init_streaming_state(context=context, language=language, **kwargs)
             return Qwen3StreamingState(
                 internal_state=streaming_state,
                 chunk_size_sec=float(kwargs.get("chunk_size_sec", 2.0)),
                 unfixed_chunk_num=int(kwargs.get("unfixed_chunk_num", 2)),
                 unfixed_token_num=int(kwargs.get("unfixed_token_num", 5)),
-                max_new_tokens=int(kwargs.get("max_new_tokens", 32)),
+                max_new_tokens=int(kwargs["max_new_tokens"]),
                 language=language,
                 chunk_count=int(getattr(streaming_state, "chunk_id", 0)),
                 last_text=str(getattr(streaming_state, "text", "") or ""),

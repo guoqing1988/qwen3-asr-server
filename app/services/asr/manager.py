@@ -9,6 +9,7 @@ from pathlib import Path
 
 from typing import Callable
 from ...core.config import settings
+from ...infrastructure import expand_env_placeholders_in_mapping
 from ...core.exceptions import DefaultServerErrorException, InvalidParameterException
 from .engines import BaseASREngine
 from .model_plan import get_default_model_id
@@ -50,13 +51,15 @@ class DeclaredEntryConfig:
         self.languages = config.get("languages", [])
         self.supports_realtime = config.get("supports_realtime", False)
 
-        # 模型路径结构
-        self.models = config.get("models", {})
+        # 模型路径结构（支持 ${VAR:-default} 环境变量占位符，便于换部署路径而无需改代码）
+        self.models = expand_env_placeholders_in_mapping(config.get("models", {}))
         self.offline_model_path = self.models.get("offline")
         self.realtime_model_path = self.models.get("realtime")
 
-        # 额外参数（如 trust_remote_code 等）
-        self.extra_kwargs = config.get("extra_kwargs", {})
+        # 额外参数（如 trust_remote_code 等，同样支持环境变量占位符）
+        self.extra_kwargs = expand_env_placeholders_in_mapping(
+            config.get("extra_kwargs", {})
+        )
 
     @property
     def has_offline_model(self) -> bool:

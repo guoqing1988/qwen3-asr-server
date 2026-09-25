@@ -198,18 +198,25 @@ def _fix_timestamp(data: list[float]) -> list[float]:
     return result
 
 
-def _resolve_forced_aligner_gpu_memory_utilization(primary_utilization: float) -> float:
-    override = (os.getenv("QWEN_FORCE_ALIGNER_GPU_MEMORY_UTILIZATION") or "").strip()
-    if override:
-        try:
-            value = float(override)
-            if 0.0 < value <= 1.0:
-                return value
-        except ValueError:
-            logger.warning(
-                "Invalid QWEN_FORCE_ALIGNER_GPU_MEMORY_UTILIZATION=%s, ignoring override",
-                override,
+def _resolve_forced_aligner_gpu_memory_utilization(
+    primary_utilization: float,
+    explicit_utilization: float | None = None,
+) -> float:
+    """解析 forced aligner 的显存利用率。
+
+    优先级：显式传入值（来自 settings 中的 .env 配置） > 继承主模型。
+    """
+    if explicit_utilization is not None:
+        if 0.0 < explicit_utilization <= 1.0:
+            logger.info(
+                "Using configured forced aligner gpu_memory_utilization=%s",
+                explicit_utilization,
             )
+            return explicit_utilization
+        logger.warning(
+            "Invalid configured forced_aligner_gpu_memory_utilization=%s, ignoring",
+            explicit_utilization,
+        )
 
     return primary_utilization
 
@@ -246,6 +253,12 @@ class Qwen3VLLMBackend:
         max_inference_batch_size: int,
         max_new_tokens: int,
         max_model_len: Optional[int] = None,
+        forced_aligner_gpu_memory_utilization: float | None = None,
+        max_num_seqs: int | None = None,
+        max_num_batched_tokens: int | None = None,
+        enforce_eager: bool = False,
+        kv_cache_memory_bytes: int | None = None,
+        forced_aligner_max_model_len: int | None = None,
     ) -> None:
         try:
             vllm_module = importlib.import_module("vllm")
@@ -277,6 +290,14 @@ class Qwen3VLLMBackend:
         }
         if max_model_len is not None:
             llm_kwargs["max_model_len"] = max_model_len
+        if max_num_seqs is not None:
+            llm_kwargs["max_num_seqs"] = max_num_seqs
+        if max_num_batched_tokens is not None:
+            llm_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
+        if enforce_eager:
+            llm_kwargs["enforce_eager"] = True
+        if kv_cache_memory_bytes is not None:
+            llm_kwargs["kv_cache_memory_bytes"] = kv_cache_memory_bytes
 
         self._llm = self._llm_cls(**llm_kwargs)
         self._sampling_params = self._sampling_params_cls(
@@ -285,13 +306,21 @@ class Qwen3VLLMBackend:
         )
         self._max_inference_batch_size = max_inference_batch_size
         self._gpu_memory_utilization = gpu_memory_utilization
+        self._forced_aligner_gpu_memory_utilization = (
+            forced_aligner_gpu_memory_utilization
+        )
         self._forced_aligner_path = local_forced_aligner_path
+        self._forced_aligner_max_model_len = forced_aligner_max_model_len
+        self._max_num_batched_tokens = max_num_batched_tokens
         self._forced_aligner: Any | None = None
         self._timestamp_token_id: int | None = None
         self._timestamp_segment_time: float | None = None
 
     def _get_forced_aligner_gpu_memory_utilization(self) -> float:
-        configured = _resolve_forced_aligner_gpu_memory_utilization(self._gpu_memory_utilization)
+        configured = _resolve_forced_aligner_gpu_memory_utilization(
+            self._gpu_memory_utilization,
+            explicit_utilization=self._forced_aligner_gpu_memory_utilization,
+        )
         logger.info(
             "Resolved forced aligner gpu_memory_utilization=%s (primary=%s)",
             configured,
@@ -310,15 +339,20 @@ class Qwen3VLLMBackend:
                 self._forced_aligner_path,
                 forced_aligner_gpu_memory_utilization,
             )
-            self._forced_aligner = self._llm_cls(
-                model=self._forced_aligner_path,
-                runner="pooling",
-                enforce_eager=True,
-                gpu_memory_utilization=forced_aligner_gpu_memory_utilization,
-                hf_overrides={
+            aligner_kwargs: dict[str, Any] = {
+                "model": self._forced_aligner_path,
+                "runner": "pooling",
+                "enforce_eager": True,
+                "gpu_memory_utilization": forced_aligner_gpu_memory_utilization,
+                "hf_overrides": {
                     "architectures": ["Qwen3ASRForcedAlignerForTokenClassification"],
                 },
-            )
+            }
+            if self._forced_aligner_max_model_len is not None:
+                aligner_kwargs["max_model_len"] = self._forced_aligner_max_model_len
+            if self._max_num_batched_tokens is not None:
+                aligner_kwargs["max_num_batched_tokens"] = self._max_num_batched_tokens
+            self._forced_aligner = self._llm_cls(**aligner_kwargs)
             llm_engine = getattr(self._forced_aligner, "llm_engine", None)
             if llm_engine is None:
                 raise RuntimeError("Forced aligner did not expose a vLLM engine instance")

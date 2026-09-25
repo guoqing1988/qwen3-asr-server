@@ -186,6 +186,7 @@ class Qwen3ASRService:
                 chunk_size_sec=ctx.params.get("chunk_size_sec", 2.0),
                 unfixed_chunk_num=ctx.params.get("unfixed_chunk_num", 2),
                 unfixed_token_num=ctx.params.get("unfixed_token_num", 5),
+                max_new_tokens=ctx.params.get("max_new_tokens"),
             )
 
             if is_valid:
@@ -251,6 +252,7 @@ class Qwen3ASRService:
                             "chunk_size_sec": payload.get("chunk_size_sec", 2.0),
                             "unfixed_chunk_num": payload.get("unfixed_chunk_num", 2),
                             "unfixed_token_num": payload.get("unfixed_token_num", 5),
+                            "max_new_tokens": payload.get("max_new_tokens"),
                         }
 
                         engine = await self._ensure_engine(ctx)
@@ -260,6 +262,7 @@ class Qwen3ASRService:
                             chunk_size_sec=ctx.params["chunk_size_sec"],
                             unfixed_chunk_num=ctx.params["unfixed_chunk_num"],
                             unfixed_token_num=ctx.params["unfixed_token_num"],
+                            max_new_tokens=ctx.params.get("max_new_tokens"),
                         )
 
                         await websocket.send_json(

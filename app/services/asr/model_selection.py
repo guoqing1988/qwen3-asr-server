@@ -17,7 +17,9 @@ from .model_plan import (
 def get_active_qwen_model_id() -> str:
     """Return the currently active Qwen model id."""
     active_qwen_model = get_active_qwen_model()
-    return active_qwen_model or "qwen3-asr-0.6b"
+    if not active_qwen_model:
+        raise InvalidParameterException("当前环境未找到可运行的 Qwen3-ASR 模型")
+    return active_qwen_model
 
 
 def get_offline_model_ids() -> List[str]:

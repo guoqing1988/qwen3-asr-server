@@ -14,11 +14,11 @@
                 "realtime": "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online"
             }
         },
-        "qwen3-asr-1.7b": {
-            "name": "Qwen3-ASR-1.7B",
+        "qwen3-asr-confucius4-r2t2": {
+            "name": "Confucius4-R2T2",
             "kind": "model",
             "engine": "qwen3",
-            "description": "Qwen3-ASR 1.7B，支持52种语言和方言；CUDA 使用 vLLM，CPU/macOS 使用 QwenASR Rust backend",
+            "description": "netease-youdao/Confucius4-R2T2，基于 Qwen3-ASR-1.7B 微调的低延迟高精度实时识别模型（中英优化）；CUDA 使用 vLLM，CPU/macOS 使用 QwenASR Rust backend",
             "languages": [
                 "zh",
                 "en",
@@ -39,11 +39,11 @@
             "default": true,
             "supports_realtime": true,
             "models": {
-                "offline": "Qwen/Qwen3-ASR-1.7B"
+                "offline": "${QWEN3_ASR_MODEL_PATH:-netease-youdao/Confucius4-R2T2}"
             },
             "extra_kwargs": {
                 "max_model_len": 16384,
-                "forced_aligner_path": "Qwen/Qwen3-ForcedAligner-0.6B",
+                "forced_aligner_path": "${QWEN3_FORCED_ALIGNER_PATH:-Qwen/Qwen3-ForcedAligner-0.6B}",
                 "max_inference_batch_size": 16
             }
         },
@@ -72,11 +72,11 @@
             "default": false,
             "supports_realtime": true,
             "models": {
-                "offline": "Qwen/Qwen3-ASR-0.6B"
+                "offline": "${QWEN3_ASR_MODEL_0_6B_PATH:-Qwen/Qwen3-ASR-0.6B}"
             },
             "extra_kwargs": {
                 "max_model_len": 16384,
-                "forced_aligner_path": "Qwen/Qwen3-ForcedAligner-0.6B",
+                "forced_aligner_path": "${QWEN3_FORCED_ALIGNER_PATH:-Qwen/Qwen3-ForcedAligner-0.6B}",
                 "max_inference_batch_size": 16
             }
         }

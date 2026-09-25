@@ -23,10 +23,6 @@ from .local_pool import LocalEnginePool
 logger = logging.getLogger(__name__)
 
 _VLLM_SHARED_CONCURRENCY = 8
-# 显存压力自适应卸载：可用显存低于该值且引擎空闲时，立即卸载释放（让位其他 GPU 服务）
-_LOW_VRAM_THRESHOLD_GB = 15.0
-# 压力卸载冷却期：距引擎最后一次使用低于该值时不因压力卸载（避免刚用完就重载）
-_VRAM_PRESSURE_COOLDOWN_S = 60.0
 
 
 class RuntimeFamily(str, Enum):
@@ -107,8 +103,10 @@ class RuntimeRouter:
         return config.model_id
 
     def _resolve_family(self, model_id: str) -> RuntimeFamily:
+        """按 models.json 声明的 engine 字段解析运行时家族（不依赖模型 id 前缀）。"""
         device = detect_device(settings.DEVICE)
-        if model_id.startswith("qwen3-asr-"):
+        engine_type = self._manager.get_declared_entry_config(model_id).engine.lower()
+        if engine_type == "qwen3":
             if device.startswith("cuda"):
                 return RuntimeFamily.QWEN_VLLM
             if device == "cpu" and is_qwenasr_rust_available():
@@ -345,7 +343,8 @@ class RuntimeRouter:
             return False
         try:
             free_bytes, _total = torch.cuda.mem_get_info()
-            return free_bytes / (1024**3) < _LOW_VRAM_THRESHOLD_GB
+            threshold_gb = settings.QWEN_LOW_VRAM_THRESHOLD_GB
+            return free_bytes / (1024**3) < threshold_gb
         except Exception:  # noqa: BLE001 - 检测失败不阻断监控
             return False
 
@@ -385,8 +384,9 @@ class RuntimeRouter:
                 continue
             idle_for = now - last_use
             if vram_pressure:
-                # 压力模式：冷却期（60s）过后即卸载，不等待完整 idle 超时
-                if idle_for < _VRAM_PRESSURE_COOLDOWN_S:
+                # 压力模式：冷却期过后即卸载，不等待完整 idle 超时
+                cooldown_s = settings.QWEN_VRAM_PRESSURE_COOLDOWN_S
+                if idle_for < cooldown_s:
                     continue
             elif idle_for < timeout:
                 continue

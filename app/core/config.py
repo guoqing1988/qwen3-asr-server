@@ -31,10 +31,18 @@ class Settings:
     # 路径配置
     BASE_DIR: Path = Path(__file__).parent.parent.parent
     TEMP_DIR: str = "temp"
-    # ModelScope 默认缓存结构: ~/.cache/modelscope/hub/models/{model_id}
+    # ModelScope 模型目录。与 modelscope 库语义保持一致：
+    # 库实际下载到 ``$MODELSCOPE_CACHE/models/<model_id>``，
+    # 因此这里默认取 ``$MODELSCOPE_CACHE/models``（未设置时为 ~/.cache/modelscope/hub/models）。
+    # 也允许用 ``MODELSCOPE_PATH`` 显式指定最终目录。
     MODELSCOPE_PATH: str = os.getenv(
-        "MODELSCOPE_CACHE",
-        os.path.expanduser("~/.cache/modelscope/hub/models"),
+        "MODELSCOPE_PATH",
+        os.path.join(
+            os.getenv(
+                "MODELSCOPE_CACHE", os.path.expanduser("~/.cache/modelscope/hub")
+            ),
+            "models",
+        ),
     )
 
     # 日志配置
@@ -78,6 +86,38 @@ class Settings:
 
     # 空闲自动卸载配置（秒；超过该时长无请求则卸载 vLLM 引擎释放显存，0=禁用）
     QWEN_IDLE_UNLOAD_TIMEOUT: int = 300
+
+    # 显存压力卸载配置：可用显存低于阈值且引擎空闲时让位其他 GPU 服务
+    QWEN_LOW_VRAM_THRESHOLD_GB: float = 15.0
+    QWEN_VRAM_PRESSURE_COOLDOWN_S: float = 60.0
+
+    # vLLM 显存利用率（0.0-1.0）。None 表示按模型权重文件大小自动估算。
+    # 属于部署/运维参数，只从环境变量读取，不写入 models.json。
+    QWEN_GPU_MEMORY_UTILIZATION: Optional[float] = None
+    # forced aligner 的显存利用率；None 表示继承主模型配置
+    QWEN_FORCE_ALIGNER_GPU_MEMORY_UTILIZATION: Optional[float] = None
+
+    # --- vLLM 运行时调优（部署/运维参数，均经 .env 配置）---
+    # 最大并发序列数（同时处理的请求数）
+    QWEN_MAX_NUM_SEQS: Optional[int] = None
+    # 单批最大 token 数；vLLM 中它同时决定音频 encoder cache 预算，调小可省显存
+    QWEN_MAX_NUM_BATCHED_TOKENS: Optional[int] = None
+    # 覆盖 models.json 中的 max_model_len
+    QWEN_MAX_MODEL_LEN: Optional[int] = None
+    # 禁用 CUDA graph 以省显存（吞吐略降）
+    QWEN_ENFORCE_EAGER: bool = False
+    # 直接指定 KV cache 字节数（比 gpu_memory_utilization 更省），None 表示不用
+    QWEN_KV_CACHE_MEMORY_BYTES: Optional[int] = None
+    # forced aligner 的 max_model_len
+    QWEN_FORCE_ALIGNER_MAX_MODEL_LEN: Optional[int] = None
+    # 流式识别单 chunk 最大生成 token 数（越小出字延迟越低，官方实时推荐 2）
+    QWEN_STREAM_MAX_NEW_TOKENS: int = 32
+
+    # Forced aligner（词级时间戳）配置
+    # 是否在启动完整性检查中要求 aligner 模型存在
+    QWEN_FORCED_ALIGNER_ENABLED: bool = True
+    # 是否在引擎加载时预热 aligner（默认 False：请求 word_timestamps 时才懒加载，节省显存）
+    QWEN_WARMUP_FORCED_ALIGNER: bool = False
 
     # Voiceprint identification configuration.
     VOICEPRINT_ENABLED: bool = True
@@ -149,6 +189,63 @@ class Settings:
             os.getenv("QWEN_IDLE_UNLOAD_TIMEOUT", str(self.QWEN_IDLE_UNLOAD_TIMEOUT))
         )
 
+        self.QWEN_LOW_VRAM_THRESHOLD_GB = float(
+            os.getenv(
+                "QWEN_LOW_VRAM_THRESHOLD_GB", str(self.QWEN_LOW_VRAM_THRESHOLD_GB)
+            )
+        )
+        self.QWEN_VRAM_PRESSURE_COOLDOWN_S = float(
+            os.getenv(
+                "QWEN_VRAM_PRESSURE_COOLDOWN_S",
+                str(self.QWEN_VRAM_PRESSURE_COOLDOWN_S),
+            )
+        )
+
+        gpu_utilization = (os.getenv("QWEN_GPU_MEMORY_UTILIZATION") or "").strip()
+        self.QWEN_GPU_MEMORY_UTILIZATION = (
+            float(gpu_utilization) if gpu_utilization else None
+        )
+        aligner_utilization = (
+            os.getenv("QWEN_FORCE_ALIGNER_GPU_MEMORY_UTILIZATION") or ""
+        ).strip()
+        self.QWEN_FORCE_ALIGNER_GPU_MEMORY_UTILIZATION = (
+            float(aligner_utilization) if aligner_utilization else None
+        )
+
+        self.QWEN_MAX_NUM_SEQS = self._optional_int("QWEN_MAX_NUM_SEQS")
+        self.QWEN_MAX_NUM_BATCHED_TOKENS = self._optional_int(
+            "QWEN_MAX_NUM_BATCHED_TOKENS"
+        )
+        self.QWEN_MAX_MODEL_LEN = self._optional_int("QWEN_MAX_MODEL_LEN")
+        self.QWEN_KV_CACHE_MEMORY_BYTES = self._optional_int(
+            "QWEN_KV_CACHE_MEMORY_BYTES"
+        )
+        self.QWEN_FORCE_ALIGNER_MAX_MODEL_LEN = self._optional_int(
+            "QWEN_FORCE_ALIGNER_MAX_MODEL_LEN"
+        )
+        self.QWEN_ENFORCE_EAGER = (
+            os.getenv("QWEN_ENFORCE_EAGER", str(self.QWEN_ENFORCE_EAGER)).lower()
+            in {"1", "true", "yes", "on"}
+        )
+        self.QWEN_STREAM_MAX_NEW_TOKENS = int(
+            os.getenv(
+                "QWEN_STREAM_MAX_NEW_TOKENS", str(self.QWEN_STREAM_MAX_NEW_TOKENS)
+            )
+        )
+
+        self.QWEN_FORCED_ALIGNER_ENABLED = (
+            os.getenv(
+                "QWEN_FORCED_ALIGNER_ENABLED", str(self.QWEN_FORCED_ALIGNER_ENABLED)
+            ).lower()
+            in {"1", "true", "yes", "on"}
+        )
+        self.QWEN_WARMUP_FORCED_ALIGNER = (
+            os.getenv(
+                "QWEN_WARMUP_FORCED_ALIGNER", str(self.QWEN_WARMUP_FORCED_ALIGNER)
+            ).lower()
+            in {"1", "true", "yes", "on"}
+        )
+
         self.VOICEPRINT_ENABLED = (
             os.getenv("VOICEPRINT_ENABLED", str(self.VOICEPRINT_ENABLED)).lower()
             in {"1", "true", "yes", "on"}
@@ -163,6 +260,17 @@ class Settings:
             )
         )
 
+
+    @staticmethod
+    def _optional_int(name: str) -> Optional[int]:
+        """读取可选整数环境变量，空值或非法值返回 None。"""
+        raw = (os.getenv(name) or "").strip()
+        if not raw:
+            return None
+        try:
+            return int(raw)
+        except ValueError:
+            return None
 
     def _parse_size(self, size_str: str) -> int:
         """解析带单位的大小字符串

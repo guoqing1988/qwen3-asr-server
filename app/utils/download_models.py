@@ -89,6 +89,9 @@ def check_all_models() -> list[tuple[str, str, str, Optional[str]]]:
 
     # Check Hugging Face models. HF assets currently do not use pinned revisions.
     for asset in hf_assets:
+        # 已存在于本地目录的模型无需下载
+        if asset.local_dir:
+            continue
         exists, _ = check_model_exists(asset.model_id, source="huggingface")
         if not exists:
             missing.append((asset.model_id, asset.description, "huggingface", None))
@@ -121,9 +124,10 @@ def fix_camplusplus_config() -> bool:
         # model ID → 本地路径映射
         id_replacements = get_camplusplus_replacement_paths(str(cache_dir))
 
-        # 从旧路径中提取 model ID 的正则：匹配 .../hub/models/<model_id>
+        # 从旧路径中提取 model ID 的正则：匹配路径末尾的 <org>/<name>。
+        # 兼容 MODELSCOPE_CACHE 迁移、缓存目录多一层 models 等情况。
         import re
-        _old_path_pattern = re.compile(r"/hub/models/(damo/.+)$")
+        _old_path_pattern = re.compile(r"/((?:damo|iic)/[^/]+)$")
 
         modified = False
         if "model" in config:
@@ -285,6 +289,9 @@ def download_models(
         for asset in ms_assets:
             all_models.append((asset.model_id, "modelscope"))
         for asset in hf_assets:
+            # 本地目录模型不属于 HF 缓存布局，不参与导出
+            if asset.local_dir:
+                continue
             all_models.append((asset.model_id, "huggingface"))
 
         exported = 0

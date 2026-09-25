@@ -109,10 +109,11 @@ def validate_qwenasr_cpu_features() -> None:
 
 
 def pick_cpu_qwen_model(all_available_models: list[str]) -> Optional[str]:
-    for model_id in ["qwen3-asr-0.6b", "qwen3-asr-1.7b"]:
-        if model_id in all_available_models:
+    """CPU 环境优先选择轻量 qwen 模型（命名含 0.6b），回退到首个可用模型。"""
+    for model_id in all_available_models:
+        if "0.6b" in model_id.lower():
             return model_id
-    return None
+    return all_available_models[0] if all_available_models else None
 
 
 def _read_linux_cpu_flags() -> set[str]:

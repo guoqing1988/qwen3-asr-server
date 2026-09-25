@@ -17,11 +17,36 @@ _QWEN_MODEL_ALIASES = {
     "0.6b": "qwen3-asr-0.6b",
     "0.6": "qwen3-asr-0.6b",
     "qwen/qwen3-asr-0.6b": "qwen3-asr-0.6b",
-    "qwen3-asr-1.7b": "qwen3-asr-1.7b",
-    "1.7b": "qwen3-asr-1.7b",
-    "1.7": "qwen3-asr-1.7b",
-    "qwen/qwen3-asr-1.7b": "qwen3-asr-1.7b",
+    "qwen3-asr-confucius4-r2t2": "qwen3-asr-confucius4-r2t2",
+    "confucius4-r2t2": "qwen3-asr-confucius4-r2t2",
+    "confucius4": "qwen3-asr-confucius4-r2t2",
+    "r2t2": "qwen3-asr-confucius4-r2t2",
+    "netease-youdao/confucius4-r2t2": "qwen3-asr-confucius4-r2t2",
 }
+
+
+def _load_declared_default_qwen_model() -> Optional[str]:
+    """读取 models.json 中显式标记 ``default: true`` 的 qwen3 引擎模型 id。
+
+    使默认模型的选择由配置驱动，而非代码内硬编码的模型名。
+    """
+    models_file = Path(settings.models_config_path)
+    if not models_file.exists():
+        return None
+    try:
+        with open(models_file, "r", encoding="utf-8") as f:
+            config = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+    for model_id, model_config in config.get("models", {}).items():
+        if not isinstance(model_config, dict):
+            continue
+        if str(model_config.get("engine", "")).lower() != "qwen3":
+            continue
+        if model_config.get("default") is True:
+            return model_id
+    return None
 
 
 def load_supported_model_ids() -> list[str]:
@@ -49,29 +74,47 @@ def get_qwen_model_override() -> Optional[str]:
 def detect_qwen_model_by_vram(all_model_ids: Optional[list[str]] = None) -> Optional[str]:
     """Pick the active Qwen model for the current machine."""
     from app.core.device import detect_device, get_vram_gb
-    from app.services.asr.qwenasr_rust import is_qwenasr_rust_available
 
     model_ids = all_model_ids or load_supported_model_ids()
     override_model = get_qwen_model_override()
     if override_model:
         return override_model if override_model in model_ids else None
 
+    # models.json 显式声明的默认模型优先（配置驱动）
+    declared_default = _load_declared_default_qwen_model()
+    if declared_default and declared_default in model_ids:
+        return declared_default
+
     resolved_device = detect_device(settings.DEVICE)
 
     # macOS defaults to the lighter Rust CPU path unless QWEN3_ASR_MODEL is set.
     if platform.system() == "Darwin":
-        return "qwen3-asr-0.6b" if is_qwenasr_rust_available() and "qwen3-asr-0.6b" in model_ids else None
+        return _pick_lightweight_model(model_ids)
 
     if resolved_device == "cpu":
-        return "qwen3-asr-0.6b" if is_qwenasr_rust_available() and "qwen3-asr-0.6b" in model_ids else None
+        return _pick_lightweight_model(model_ids)
 
     vram = get_vram_gb()
-    preferred = "qwen3-asr-1.7b" if vram >= 32 else "qwen3-asr-0.6b"
-    if preferred in model_ids:
+    preferred = _pick_large_model(model_ids) if vram >= 32 else _pick_lightweight_model(model_ids)
+    if preferred:
         return preferred
+    return model_ids[0] if model_ids else None
 
-    fallback = "qwen3-asr-0.6b" if preferred == "qwen3-asr-1.7b" else "qwen3-asr-1.7b"
-    return fallback if fallback in model_ids else None
+
+def _pick_lightweight_model(model_ids: list[str]) -> Optional[str]:
+    """在候选模型中优先选择轻量版本（命名含 0.6b），用于低显存/CPU 环境。"""
+    for model_id in model_ids:
+        if "0.6b" in model_id.lower():
+            return model_id
+    return model_ids[0] if model_ids else None
+
+
+def _pick_large_model(model_ids: list[str]) -> Optional[str]:
+    """在候选模型中优先选择非轻量版本，用于大显存环境。"""
+    for model_id in model_ids:
+        if "0.6b" not in model_id.lower():
+            return model_id
+    return model_ids[0] if model_ids else None
 
 
 def get_active_qwen_model(all_model_ids: Optional[list[str]] = None) -> str:

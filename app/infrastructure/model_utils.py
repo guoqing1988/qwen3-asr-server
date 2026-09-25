@@ -3,12 +3,69 @@
 
 import logging
 import os
+import re
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+# 支持 ${VAR} 与 ${VAR:-default} 两种占位符，供 models.json 引用部署环境变量
+_ENV_PLACEHOLDER_PATTERN = re.compile(
+    r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*?))?\}"
+)
+
+
+def expand_env_placeholders(value: str) -> str:
+    """展开字符串中的 ``${VAR}`` / ``${VAR:-default}`` 占位符。
+
+    - 环境变量已设置且非空 → 取环境变量值
+    - 未设置 → 取 ``:-`` 后的默认值
+    - 未设置且无默认值 → 保留原占位符（避免静默产生空路径）
+    """
+    if not isinstance(value, str) or "${" not in value:
+        return value
+
+    def _replace(match: re.Match[str]) -> str:
+        name, default = match.group(1), match.group(2)
+        env_value = os.getenv(name)
+        if env_value:
+            return env_value
+        if default is not None:
+            return default
+        return match.group(0)
+
+    return _ENV_PLACEHOLDER_PATTERN.sub(_replace, value)
+
+
+def expand_env_placeholders_in_mapping(
+    mapping: dict[str, Any],
+) -> dict[str, Any]:
+    """递归展开映射中所有字符串值的环境变量占位符。"""
+    expanded: dict[str, Any] = {}
+    for key, value in mapping.items():
+        if isinstance(value, str):
+            expanded[key] = expand_env_placeholders(value)
+        elif isinstance(value, dict):
+            expanded[key] = expand_env_placeholders_in_mapping(value)
+        else:
+            expanded[key] = value
+    return expanded
+
+
+def resolve_local_model_dir(model_ref: str) -> Path | None:
+    """若 ``model_ref`` 指向已存在的本地目录则返回其绝对路径，否则返回 None。
+
+    用于区分「本地路径模型」与「HF/ModelScope 模型引用」：
+    完整性检查、下载流程对两者的目录结构假设不同。
+    """
+    if not model_ref:
+        return None
+    candidate = Path(os.path.expandvars(model_ref)).expanduser()
+    if candidate.is_dir():
+        return candidate.resolve()
+    return None
 
 
 def _is_truthy(value: str | None) -> bool:
