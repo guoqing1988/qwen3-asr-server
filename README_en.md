@@ -48,23 +48,24 @@ For Linux servers with NVIDIA GPU:
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Clone and install dependencies
-git clone <your-repo> && cd qwen3-asr
+git clone <your-repo> && cd qwen3-asr-server
 uv venv --python 3.12
 uv sync
 
-# Configure
-cp .env.example .env  # edit PORT, MODELSCOPE_CACHE, HF_HOME etc.
+# Configure (port, model paths, etc. are all driven by .env, never hard-coded)
+cp .env.example .env
+# Models live under /data1/models (outside the project directory), e.g.:
+#   ASR model        QWEN3_ASR_MODEL_PATH=/data1/models/Confucius4-R2T2
+#   Forced aligner   QWEN3_FORCED_ALIGNER_PATH=/data1/models/Qwen3-ForcedAligner-0.6B
+#   ModelScope       MODELSCOPE_CACHE=/data1/models/modelscope/hub
 
-# Fix model file permissions (if migrated from Docker)
-sudo chown -R $(whoami):$(whoami) models/ logs/ temp/ data/
-
-# Register and start service
-sudo ln -s /data/www/qwen3-asr/qwen3-asr.service /etc/systemd/system/
+# Register and start service (symlinked: editing the repo unit file + daemon-reload is enough)
+sudo ln -sfn "$(pwd)/qwen3-asr.service" /etc/systemd/system/qwen3-asr.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now qwen3-asr
 ```
 
-Service URLs:
+Service URLs (the port is driven by `PORT` in `.env`):
 - **API Endpoint**: `http://localhost:9101`
 - **API Docs**: `http://localhost:9101/docs`
 
@@ -210,6 +211,7 @@ Current runtime behavior on the mainline codebase:
 - `macOS / Apple Silicon` also uses vendored `QwenASR` Rust
 - macOS / Apple Silicon defaults to `qwen3-asr-0.6b`
 - `qwen3-asr-1.7b` on macOS is only used when `QWEN3_ASR_MODEL=qwen3-asr-1.7b`
+- The default offline model is `qwen3-asr-confucius4-r2t2` (Confucius4-R2T2, CUDA vLLM path)
 - `word_timestamps=true` works on the current offline CUDA and CPU Rust paths
 - WebSocket streaming does not currently return word-level timestamps
 - CAM++ speaker diarization remains required and still follows `DEVICE`; on CPU its main hotspot is speaker verification embedding
@@ -240,7 +242,7 @@ Notes:
 
 Both offline transcription endpoints are **synchronous** (submit the full
 audio, wait, and get the complete result in one response). Both use
-qwen3-asr-1.7b and support speaker diarization, voiceprint naming and
+qwen3-asr-confucius4-r2t2 and support speaker diarization, voiceprint naming and
 word-level timestamps. True streaming lives on the WebSocket endpoints below:
 
 | Aspect | `/stream/v1/asr` (Alibaba Cloud compatible) | `/v1/audio/transcriptions` (OpenAI compatible) |
@@ -531,6 +533,7 @@ Automatic long audio segmentation:
 
 | Model ID | Name | Description | Features |
 |----------|------|-------------|----------|
+| `qwen3-asr-confucius4-r2t2` | Confucius4-R2T2 | **Default model**. NetEase Youdao realtime ASR (`default: true` in `models.json`); CUDA uses vLLM | Offline/Realtime |
 | `qwen3-asr-1.7b` | Qwen3-ASR 1.7B | High-performance multilingual ASR, 52 languages + dialects; CUDA uses vLLM | Offline/Realtime |
 | `qwen3-asr-0.6b` | Qwen3-ASR 0.6B | Lightweight multilingual ASR; CUDA uses vLLM, CPU/macOS uses Rust backend | Offline/Realtime |
 
@@ -541,56 +544,55 @@ Automatic long audio segmentation:
 | `paraformer-large` | FunASR realtime | Chinese websocket realtime stack with realtime punctuation |
 
 **Runtime selection:**
-- **VRAM >= 32GB**: Select `qwen3-asr-1.7b`
-- **VRAM < 32GB**: Select `qwen3-asr-0.6b`
-- **No CUDA**: Select the vendored Rust-backed `qwen3-asr-0.6b`
-- **macOS / Apple Silicon**: Always default to `qwen3-asr-0.6b`, regardless of memory size
-- **Environment override**: Set `QWEN3_ASR_MODEL=qwen3-asr-1.7b` or `QWEN3_ASR_MODEL=qwen3-asr-0.6b` to bypass automatic selection
+- **Default**: `qwen3-asr-confucius4-r2t2` (low VRAM: ~6.0GB for the ASR engine alone, ~8.7GB for the full stack with VAD/voiceprint/Paraformer/punctuation on a 24GB card)
+- **Tight VRAM / CPU-only / macOS**: Select the vendored Rust-backed `qwen3-asr-0.6b`
+- **Environment override**: Set `QWEN3_ASR_MODEL=qwen3-asr-confucius4-r2t2`, `qwen3-asr-1.7b` or `qwen3-asr-0.6b` to bypass automatic selection
+- **Local paths**: override with `QWEN3_ASR_MODEL_PATH` / `QWEN3_FORCED_ALIGNER_PATH` (`models.json` supports `${VAR:-default}` placeholders)
 - `paraformer-large` realtime capability is always prepared for websocket streaming
 
 At startup the service checks the current runtime model plan and downloads missing models by default. Set `HF_HUB_OFFLINE=1` only for strictly offline deployments with a prepared cache.
 
 ## Model Inventory
 
-All runtime models are cached under the project `models/` directory and mounted
-into the container. Models are split across two channels:
+All runtime models live under `/data1/models/` (paths are configurable via
+`MODELSCOPE_CACHE`, `HF_HOME`, `QWEN3_ASR_MODEL_PATH`, `QWEN3_FORCED_ALIGNER_PATH`),
+split across two channels:
 
 | Model | Size | Channel & Path | Used By |
 |-------|------|----------------|---------|
-| Qwen3-ASR 1.7B | ~4.4GB | HF: `models/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B` | Offline transcription, `/ws/v1/asr/qwen` streaming, voiceprint-independent ASR |
-| Qwen3-ForcedAligner 0.6B | ~1.8GB | HF: `models/huggingface/hub/models--Qwen--Qwen3-ForcedAligner-0.6B` | Word-level timestamps (`word_timestamps=true`, offline) |
-| Paraformer Large | ~849MB | MS: `models/modelscope/hub/models/iic/speech_paraformer-large_...` | `/ws/v1/asr` + `/ws/v1/asr/funasr` (Chinese realtime streaming) |
-| Punctuation (offline) | ~300MB | MS: `models/modelscope/hub/models/iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch` | Punctuation for offline/streaming ASR |
-| Punctuation (realtime) | ~300MB | MS: `models/modelscope/hub/models/iic/punc_ct-transformer_..._vad_realtime-...` | Realtime punctuation in the FunASR websocket path |
-| CAM++ diarization | ~300MB | MS: `models/modelscope/hub/models/iic/speech_campplus_speaker-diarization_common` | Speaker diarization (offline) |
-| CAM++ speaker verification | ~90MB | MS: `models/modelscope/hub/models/damo/speech_campplus_sv_zh-cn_16k-common` | Speaker clustering + voiceprint matching |
-| CAM++ SCL | ~90MB | MS: `models/modelscope/hub/models/damo/speech_campplus-transformer_scl_zh-cn_16k-common` | Speaker clustering |
-| VAD (FSMN) | ~69MB | MS: `models/modelscope/hub/models/damo/speech_fsmn_vad_zh-cn-16k-common-pytorch` | Voice activity detection for audio splitting |
+| Confucius4-R2T2 | ~3.9GB | Local: `/data1/models/Confucius4-R2T2` | **Default** offline transcription, `/ws/v1/asr/qwen` streaming |
+| Qwen3-ForcedAligner 0.6B | ~1.8GB | Local: `/data1/models/Qwen3-ForcedAligner-0.6B` | Word-level timestamps (`word_timestamps=true`, offline, lazy-loaded) |
+| Paraformer Large | ~849MB | MS: `/data1/models/modelscope/hub/models/iic/speech_paraformer-large_...` | `/ws/v1/asr` + `/ws/v1/asr/funasr` (Chinese realtime streaming) |
+| Punctuation (offline) | ~300MB | MS: `/data1/models/modelscope/hub/models/iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch` | Punctuation for offline/streaming ASR |
+| Punctuation (realtime) | ~300MB | MS: `/data1/models/modelscope/hub/models/iic/punc_ct-transformer_..._vad_realtime-...` | Realtime punctuation in the FunASR websocket path |
+| CAM++ diarization | ~300MB | MS: `/data1/models/modelscope/hub/models/iic/speech_campplus_speaker-diarization_common` | Speaker diarization (offline) |
+| CAM++ speaker verification | ~90MB | MS: `/data1/models/modelscope/hub/models/damo/speech_campplus_sv_zh-cn_16k-common` | Speaker clustering + voiceprint matching |
+| CAM++ SCL | ~90MB | MS: `/data1/models/modelscope/hub/models/damo/speech_campplus-transformer_scl_zh-cn_16k-common` | Speaker clustering |
+| VAD (FSMN) | ~69MB | MS: `/data1/models/modelscope/hub/models/damo/speech_fsmn_vad_zh-cn-16k-common-pytorch` | Voice activity detection for audio splitting |
 
 **Scenario guidance**:
 
 - **Chinese realtime streaming** (low latency, realtime punctuation): FunASR
   path uses Paraformer Large + realtime punctuation (ModelScope).
-- **Multilingual / offline / word timestamps**: Qwen3-ASR 1.7B + ForcedAligner
-  (HuggingFace).
+- **Multilingual / offline / word timestamps**: Confucius4-R2T2 + ForcedAligner.
 - **Speaker diarization & voiceprints** (offline only): CAM++ models (ModelScope).
 - **Download behavior**: missing models are auto-downloaded at startup
   (ModelScope models from `modelscope.cn`, Qwen models from HuggingFace, or the
-  `HF_ENDPOINT` mirror). For fully offline deployments run
-  `./scripts/prepare-models.sh` once and copy the `models/` directory.
+  `HF_ENDPOINT` mirror). For fully offline deployments, place the models under
+  `/data1/models` and configure the path variables above.
 
 **Endpoint × model matrix**:
 
 | Endpoint | Model |
 |----------|-------|
-| `POST /v1/audio/transcriptions` | qwen3-asr-1.7b |
-| `POST /stream/v1/asr` | qwen3-asr-1.7b |
+| `POST /v1/audio/transcriptions` | qwen3-asr-confucius4-r2t2 |
+| `POST /stream/v1/asr` | qwen3-asr-confucius4-r2t2 |
 | `GET /v1/models`, `health`, `/stream/v1/asr/models` | read-only, no inference |
-| `/ws/v1/asr/qwen` | qwen3-asr-1.7b |
+| `/ws/v1/asr/qwen` | qwen3-asr-confucius4-r2t2 |
 | `/ws/v1/asr`, `/ws/v1/asr/funasr` | paraformer-large (Chinese realtime) |
 
 All HTTP transcription endpoints share the default offline model
-(`qwen3-asr-1.7b`; override with `QWEN3_ASR_MODEL=qwen3-asr-0.6b`).
+(`qwen3-asr-confucius4-r2t2`; override with `QWEN3_ASR_MODEL=qwen3-asr-0.6b`).
 Paraformer serves only the two FunASR-compatible WebSocket endpoints.
 
 ## Voiceprint Database
@@ -642,19 +644,32 @@ Settings in `.env.example`:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PORT` | `8000` | Service listen port (set to `9101` for local systemd deployment) |
+| `PORT` | `8000` | Service listen port (set as needed for local deployment; freely changeable) |
 | `DEVICE` | `auto` | Inference device (`cuda:0`, `cpu`) |
 | `NGINX_PORT` | `9101` | Host port exposed by Docker Compose |
 | `API_KEY` | - | API authentication key (optional, unauthenticated if not set) |
 | `CUDA_VISIBLE_DEVICES` | `0` | Visible GPU list; one backend instance is started per visible GPU |
-| `QWEN3_ASR_MODEL` | auto | Force `qwen3-asr-1.7b` or `qwen3-asr-0.6b` instead of VRAM-based selection |
-| `HF_HUB_OFFLINE` | unset | Set to `1` only after preparing `./models` for offline deployment |
+| `QWEN3_ASR_MODEL` | auto | Force `qwen3-asr-confucius4-r2t2`, `qwen3-asr-1.7b` or `qwen3-asr-0.6b` |
+| `QWEN3_ASR_MODEL_PATH` | `netease-youdao/Confucius4-R2T2` | ASR model path (local absolute path or HF repo id; referenced via `${VAR:-default}` in `models.json`) |
+| `QWEN3_FORCED_ALIGNER_PATH` | `Qwen/Qwen3-ForcedAligner-0.6B` | Word-level timestamp aligner path |
+| `HF_HUB_OFFLINE` | unset | Set to `1` only after preparing models for offline deployment |
 | `HF_ENDPOINT` | unset | Online Hugging Face mirror endpoint, for example `https://hf-mirror.com` |
-| `HF_HOME` | `~/.cache/huggingface` | HuggingFace cache directory (set to project `models/huggingface` for local deployment) |
-| `MODELSCOPE_CACHE` | `~/.cache/modelscope/hub/models` | ModelScope model cache path (set to project `models/modelscope/hub/models` for local deployment) |
-| `QWEN_GPU_MEMORY_UTILIZATION` | auto | vLLM GPU memory utilization (0.0-1.0) for the main ASR model. Default is auto-calculated as `12GB / total VRAM`; lower it to reduce resident VRAM |
+| `HF_HOME` | `~/.cache/huggingface` | HuggingFace cache directory (this project uses `/data1/models/huggingface`) |
+| `MODELSCOPE_CACHE` | `~/.cache/modelscope/hub/models` | ModelScope cache root (this project uses `/data1/models/modelscope/hub`; the library appends `/models/<id>`) |
+| `QWEN_GPU_MEMORY_UTILIZATION` | auto | vLLM GPU memory utilization (0.0-1.0) for the main ASR model. Operational parameters live in `.env` only (no longer hard-coded in `models.json`); explicit values win over auto-estimation |
+| `QWEN_KV_CACHE_MEMORY_BYTES` | - | Exact KV cache size in bytes (e.g. `1610612736` = 1.5GiB). Once set, vLLM no longer fills VRAM by utilization |
+| `QWEN_MAX_NUM_SEQS` | vLLM default | Max concurrent sequences (this project uses `5`, i.e. 5 concurrent requests) |
+| `QWEN_MAX_NUM_BATCHED_TOKENS` | vLLM default | Max tokens per batch (also the encoder cache budget; this project uses `2048`) |
+| `QWEN_MAX_MODEL_LEN` | `4096` | Context length limit |
+| `QWEN_ENFORCE_EAGER` | `false` | Disable CUDA graph / torch.compile, saving ~0.5GB VRAM (this project uses `true`) |
 | `QWEN_FORCE_ALIGNER_GPU_MEMORY_UTILIZATION` | inherits | GPU memory utilization for the forced aligner vLLM instance (0.0-1.0) |
-| `QWEN_IDLE_UNLOAD_TIMEOUT` | `300` | Unload vLLM engines to release VRAM after this many seconds without requests; `0` disables idle unload |
+| `QWEN_FORCE_ALIGNER_MAX_MODEL_LEN` | - | `max_model_len` for the forced aligner (this project uses `2048`) |
+| `QWEN_FORCED_ALIGNER_ENABLED` | `true` | Enable the forced aligner (`false` disables word-level timestamps) |
+| `QWEN_WARMUP_FORCED_ALIGNER` | `false` | Warm up the aligner at startup. When `false`, it is lazily loaded on the first `word_timestamps=true` request (key to cutting startup VRAM from 16GB to 6GB) |
+| `QWEN_STREAM_MAX_NEW_TOKENS` | `32` | Max tokens generated per streaming chunk (the official realtime recipe uses `2`; lower means less output latency, overridable per request) |
+| `QWEN_IDLE_UNLOAD_TIMEOUT` | `300` | Unload vLLM engines to release VRAM after this many seconds without requests; `0` disables (this project uses `900`, i.e. 15 minutes) |
+| `QWEN_LOW_VRAM_THRESHOLD_GB` | `6.0` | Trigger VRAM-pressure unload when free VRAM drops below this value while engines are idle |
+| `QWEN_VRAM_PRESSURE_COOLDOWN_S` | `60` | Idle seconds required before a VRAM-pressure unload |
 | `ASR_DEFAULT_HOTWORDS` | (empty) | Server-side preset hotwords (comma-separated, recommended ≤512 chars), merged with request hotwords (OpenAI `prompt` / native `vocabulary_id`) before being injected into the recognition context; hotwords are adopted preferentially, not forced |
 | `VOICEPRINT_ENABLED` | `true` | Enable voiceprint identity matching in ASR results |
 | `VOICEPRINT_DB_PATH` | `./data/voiceprints.sqlite3` | SQLite + sqlite-vec voiceprint database path |
@@ -662,27 +677,49 @@ Settings in `.env.example`:
 
 ### GPU Memory Control and Idle Unload
 
-The CUDA vLLM runtime pre-allocates GPU memory according to the memory utilization
-ratio (default: `12GB / total VRAM`, capped at 0.95). On a 48GB GPU this reserves
-about 12GB for the main engine plus another reservation for the forced aligner.
-To reduce resident VRAM, lower the ratios in `.env`:
+The CUDA vLLM runtime can be squeezed with these `.env` knobs:
 
 ```dotenv
-QWEN_GPU_MEMORY_UTILIZATION=0.20
-QWEN_FORCE_ALIGNER_GPU_MEMORY_UTILIZATION=0.15
+QWEN_GPU_MEMORY_UTILIZATION=0.35
+QWEN_KV_CACHE_MEMORY_BYTES=1610612736   # 1.5GiB, precise KV cache control
+QWEN_MAX_NUM_SEQS=5
+QWEN_MAX_NUM_BATCHED_TOKENS=2048
+QWEN_MAX_MODEL_LEN=4096
+QWEN_ENFORCE_EAGER=true
+QWEN_WARMUP_FORCED_ALIGNER=false        # lazy-load the aligner
 ```
 
-Note: going too low fails startup — on a 48GB GPU the main engine needs at least
-~0.16 and the forced aligner ~0.12 (vLLM 0.19 also profiles CUDA graph memory),
-otherwise there is no room left for the KV cache.
+**Lazy forced aligner**: the aligner is a separate vLLM instance (~3GB). With
+`QWEN_WARMUP_FORCED_ALIGNER=false` it is not warmed up at startup and only loads
+when a `word_timestamps=true` request actually arrives — the key change that
+brings normal startup VRAM down from 16GB to ~6GB.
 
-**Idle unload**: with `QWEN_IDLE_UNLOAD_TIMEOUT` set (default `300` seconds), a
-background monitor unloads the vLLM engines (main model + forced aligner) after the
-configured time without any request, terminating their EngineCore processes so the
-GPU memory is returned to the system. The next request triggers an automatic lazy
-reload, which takes roughly 30-60 seconds. Requests that are running or waiting on
-the engine are never unloaded mid-flight; the monitor only fires when the engine is
-fully idle. Set `QWEN_IDLE_UNLOAD_TIMEOUT=0` to keep models resident permanently.
+**Measured VRAM** (RTX 4090 24GB, `CUDA_VISIBLE_DEVICES=7`):
+
+| Scenario | VRAM |
+|----------|------|
+| Baseline (idle) | 0.86GB |
+| ASR engine only (Confucius4-R2T2) | ~6.0GB |
+| Full service (+ VAD / CAM++ / Paraformer / punctuation) | ~8.7GB |
+| Word-level timestamps requested (+ aligner) | ~12GB (peak) |
+
+**Idle unload**: with `QWEN_IDLE_UNLOAD_TIMEOUT` set, a background monitor unloads
+the vLLM engines (main model + forced aligner) after the configured time without
+any request, terminating their EngineCore processes so the GPU memory is returned
+to the system. The next request triggers an automatic lazy reload, which takes
+roughly 30-60 seconds. Requests that are running or waiting on the engine are
+never unloaded mid-flight; the monitor only fires when the engine is fully idle.
+Set `0` to keep models resident permanently; `900` (15 minutes) is typical for
+shared GPUs.
+
+**VRAM-pressure unload**: when free VRAM drops below `QWEN_LOW_VRAM_THRESHOLD_GB`
+and an engine has been idle longer than `QWEN_VRAM_PRESSURE_COOLDOWN_S`, it yields
+the GPU to other processes automatically.
+
+Note: if you rely on utilization alone (without `QWEN_KV_CACHE_MEMORY_BYTES`),
+going too low fails startup — the main engine needs at least ~0.16 and the forced
+aligner ~0.12 (vLLM 0.19 also profiles CUDA graph memory), otherwise there is no
+room left for the KV cache.
 
 ## API Documentation
 

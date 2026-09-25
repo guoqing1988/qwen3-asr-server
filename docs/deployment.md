@@ -18,7 +18,7 @@
 **前置要求：**
 - NVIDIA GPU（默认镜像面向 CUDA 12.8+；CUDA 12.6 / 13.0 可通过构建参数覆盖）
 - 已安装 NVIDIA Container Toolkit
-- 显存 12GB+（推荐 16GB+ 以支持 Qwen3-ASR 1.7B）
+- 显存 8GB+（默认模型 Confucius4-R2T2；24GB 卡实测：仅 ASR 引擎约 6GB，含 VAD/声纹/Paraformer/标点完整栈约 8.7GB，启用词级时间戳峰值约 12GB）
 
 ```bash
 # 使用 docker run（带模型挂载）
@@ -85,14 +85,14 @@ CPU 镜像使用 QwenASR Rust，并自动选择 `qwen3-asr-0.6b`。x86_64 需要
 
 **前置要求：**
 - Ubuntu 22.04+ / 同等 Linux 发行版
-- NVIDIA GPU + 驱动（推荐 16GB+ 显存）
+- NVIDIA GPU + 驱动（显存 8GB+，推荐 12GB+ 以启用词级时间戳）
 - CUDA 12.8（按 PyTorch cu128 编译）
 - [uv](https://docs.astral.sh/uv/) 包管理器（安装：`curl -LsSf https://astral.sh/uv/install.sh | sh`）
 
 **1. 创建虚拟环境并安装依赖**
 
 ```bash
-cd /data/www/qwen3-asr
+cd /data1/www/qwen3-asr-server
 
 # 创建虚拟环境（Python 3.12）
 uv venv --python 3.12
@@ -114,31 +114,45 @@ cp .env.example .env   # 如不存在则手动创建
 
 | 变量 | 本地部署取值 | 说明 |
 |------|-------------|------|
-| `PORT` | `9101` | 服务监听端口 |
-| `DEVICE` | `cuda:0` | 推理设备 |
+| `PORT` | `9101`（按需修改） | 服务监听端口，无任何硬编码，随便改 |
+| `CUDA_VISIBLE_DEVICES` | `7` | 指定使用的 GPU（本机为 8×RTX 4090） |
+| `DEVICE` | `cuda:0` | 推理设备（单卡可见时即 `cuda:0`） |
 | `HF_HUB_OFFLINE` | `1` | 离线模式，不走 HuggingFace 联网 |
 | `HF_ENDPOINT` | `https://hf-mirror.com` | HuggingFace 镜像（下载模型时临时关离线） |
-| `MODELSCOPE_CACHE` | `/data/www/qwen3-asr/models/modelscope/hub/models` | ModelScope 模型缓存路径 |
-| `HF_HOME` | `/data/www/qwen3-asr/models/huggingface` | HuggingFace 缓存路径 |
+| `MODELSCOPE_CACHE` | `/data1/models/modelscope/hub` | ModelScope 缓存根目录（库内部再拼 `/models/<id>`） |
+| `HF_HOME` | `/data1/models/huggingface` | HuggingFace 缓存路径 |
+| `QWEN3_ASR_MODEL_PATH` | `/data1/models/Confucius4-R2T2` | ASR 主模型本地路径 |
+| `QWEN3_FORCED_ALIGNER_PATH` | `/data1/models/Qwen3-ForcedAligner-0.6B` | 词级时间戳对齐器路径 |
 | `API_KEY` | 与服务端鉴权一致 | 服务会校验此 Key |
-| `QWEN_GPU_MEMORY_UTILIZATION` | `0.20` | 主引擎显存占用比 |
-| `QWEN_FORCE_ALIGNER_GPU_MEMORY_UTILIZATION` | `0.15` | 对齐器显存占用比 |
-| `QWEN_IDLE_UNLOAD_TIMEOUT` | `300` | 空闲卸载超时（秒），0 禁用 |
+| `QWEN_GPU_MEMORY_UTILIZATION` | `0.35` | 主引擎显存占用比（运维参数一律走 `.env`） |
+| `QWEN_KV_CACHE_MEMORY_BYTES` | `1610612736` | KV cache 精确字节数（1.5GiB） |
+| `QWEN_MAX_NUM_SEQS` | `5` | 最大并发序列数（5 并发） |
+| `QWEN_MAX_NUM_BATCHED_TOKENS` | `2048` | 单批最大 token 数（= encoder cache 预算） |
+| `QWEN_MAX_MODEL_LEN` | `4096` | 上下文长度 |
+| `QWEN_ENFORCE_EAGER` | `true` | 关闭 CUDA graph/torch.compile，省约 0.5GB 显存 |
+| `QWEN_FORCE_ALIGNER_GPU_MEMORY_UTILIZATION` | `0.20` | 对齐器显存占用比 |
+| `QWEN_FORCE_ALIGNER_MAX_MODEL_LEN` | `2048` | 对齐器上下文长度 |
+| `QWEN_WARMUP_FORCED_ALIGNER` | `false` | 不启动预热对齐器，改为首次词级时间戳请求时懒加载（启动显存 16GB→6GB 的关键） |
+| `QWEN_STREAM_MAX_NEW_TOKENS` | `2` | 流式单 chunk 最大生成 token（越小出字延迟越低） |
+| `QWEN_IDLE_UNLOAD_TIMEOUT` | `900` | 空闲卸载超时（秒），0 禁用；`900` = 15 分钟无请求自动卸载 |
+| `QWEN_LOW_VRAM_THRESHOLD_GB` | `6.0` | 显存压力卸载阈值 |
 
-> **路径说明**：`MODELSCOPE_CACHE` 和 `HF_HOME` 必须指向实际模型目录。
-> 如果之前用过 Docker，模型已在 `models/modelscope/` 和 `models/huggingface/` 下，
-> 指向宿主机路径即可。`app/core/config.py` 的 `MODELSCOPE_PATH` 默认值为
-> `~/.cache/modelscope/hub/models`，仅在未设置 `MODELSCOPE_CACHE` 时生效。
+> **路径说明**：模型统一放在 `/data1/models`（不放在项目目录内）。
+> `models.json` 支持 `${VAR:-default}` 占位符，换模型/换路径只改 `.env`：
+> `QWEN3_ASR_MODEL_PATH`（ASR 主模型）、`QWEN3_FORCED_ALIGNER_PATH`（对齐器）、
+> `MODELSCOPE_CACHE`（ModelScope 根目录）、`HF_HOME`（HuggingFace 缓存）。
+> `app/core/config.py` 的 `MODELSCOPE_PATH` = `$MODELSCOPE_CACHE/models`（ModelScope
+> 库内部结构如此），仅在未设置 `MODELSCOPE_CACHE` 时用默认 `~/.cache/modelscope/hub/models`。
 
 **3. 修复模型目录权限**
 
 Docker 挂载的模型文件通常属 root，本地运行时需要修正：
 
 ```bash
-sudo chown -R $(whoami):$(whoami) /data/www/qwen3-asr/models/
-sudo chown -R $(whoami):$(whoami) /data/www/qwen3-asr/logs/
-sudo chown -R $(whoami):$(whoami) /data/www/qwen3-asr/temp/
-sudo chown -R $(whoami):$(whoami) /data/www/qwen3-asr/data/
+sudo chown -R $(whoami):$(whoami) /data1/models/
+sudo chown -R $(whoami):$(whoami) /data1/www/qwen3-asr-server/logs/
+sudo chown -R $(whoami):$(whoami) /data1/www/qwen3-asr-server/temp/
+sudo chown -R $(whoami):$(whoami) /data1/www/qwen3-asr-server/data/
 ```
 
 **4. 启动验证**
@@ -146,7 +160,7 @@ sudo chown -R $(whoami):$(whoami) /data/www/qwen3-asr/data/
 先直接用命令行确认能启动，再注册 systemd 服务：
 
 ```bash
-cd /data/www/qwen3-asr
+cd /data1/www/qwen3-asr-server
 .venv/bin/python start.py
 ```
 
@@ -155,17 +169,22 @@ cd /data/www/qwen3-asr
 **5. 注册 systemd 服务**
 
 ```bash
-sudo ln -s /data/www/qwen3-asr/qwen3-asr.service /etc/systemd/system/qwen3-asr.service
+sudo ln -sfn /data1/www/qwen3-asr-server/qwen3-asr.service /etc/systemd/system/qwen3-asr.service
 sudo systemctl daemon-reload
 sudo systemctl enable qwen3-asr.service
 sudo systemctl start qwen3-asr.service
 ```
 
+> 用**软链接**而不是 `cp`：仓库里的 `qwen3-asr.service` 成为唯一来源，
+> 以后改 unit（端口无关，主要是 GPU、路径、限流参数）只需 `daemon-reload`，
+> 不会再出现仓库与 `/etc/systemd/system` 两份文件不一致的问题。
+
 服务配置要点：
+- unit 文件用**软链接**安装（见上），改仓库中的 unit 后 `daemon-reload` 即生效
 - `Restart=on-failure`：进程异常退出自动重启，间隔 10s
-- `StartLimitBurst=3 / StartLimitInterval=300s`：5 分钟内重启超过 3 次则停止重试，防止无限重启
+- `StartLimitBurst=3` / `StartLimitIntervalSec=300`（写在 `[Unit]` 段）：5 分钟内重启超过 3 次则停止重试；调试期间频繁 `restart` 会触发 `start-limit-hit`，用 `sudo systemctl reset-failed qwen3-asr` 清除后重试
 - `.env` 通过 `start.py` 中的 `load_dotenv()` 加载，不需要 `EnvironmentFile=`
-- GPU 设备通过 `Environment="CUDA_VISIBLE_DEVICES=0"` 指定
+- GPU 设备由 `.env` 的 `CUDA_VISIBLE_DEVICES` 驱动（unit 里**不要**再写 `Environment="CUDA_VISIBLE_DEVICES=..."`，因为 systemd 的 `Environment=` 优先级高于 `.env`，会把 `.env` 里的值架空）
 
 **6. 日常运维**
 
@@ -193,10 +212,11 @@ sudo systemctl reset-failed qwen3-asr
 
 ```bash
 # ① 修正模型文件权限
-sudo chown -R $(whoami):$(whoami) /data/www/qwen3-asr/models/
+sudo chown -R $(whoami):$(whoami) /data1/models/
 
 # ② 确保 CAM++ 子模型路径正确
 # 启动时 fix_camplusplus_config() 会自动修正 configuration.json 中的旧路径
+# （支持旧 Docker 路径，以及缓存目录多一层 models 的情况）
 ```
 
 其余无需变动：模型缓存、声纹数据库、`.env` 配置均兼容。
@@ -229,7 +249,7 @@ curl -X POST "http://localhost:9101/stream/v1/asr" \
 curl -X POST "http://localhost:9101/v1/audio/transcriptions" \
   -H "Authorization: Bearer any" \
   -F "file=@test.wav" \
-  -F "model=qwen3-asr-1.7b"
+  -F "model=qwen3-asr-confucius4-r2t2"
 ```
 
 ### 引擎加载容错说明
@@ -239,12 +259,28 @@ vLLM 引擎初始化在特定宿主环境（如 CPU 电压不稳、驱动兼容�
 1. **懒加载自动重试**：引擎被空闲卸载后，请求触发懒加载时创建失败会自动重试 3 次（间隔 5s/10s 递增），提高恢复概率。
 2. **预加载失败降级启动**：启动时 qwen3 引擎预加载失败不再拒绝启动（降级继续，funasr 等其余引擎照常服务），失败引擎在后续请求时由懒加载路径自动重试恢复。
 
-### 显存释放策略
+### 显存策略
 
-vLLM 引擎在线时峰值显存较大（推理后主进程持有音频编码器 buffer，属正常架构开销）。服务按两级策略释放显存，让位给同一 GPU 上的其他服务（如 ComfyUI）：
+默认模型为 **Confucius4-R2T2**，配合「forced aligner 懒加载 + KV cache 精确控制」，启动显存已从 16GB 降到约 6GB（含基线的 nvidia-smi 读数）。实测（RTX 4090 24GB，`CUDA_VISIBLE_DEVICES=7`）：
 
-1. **空闲自动卸载**：`QWEN_IDLE_UNLOAD_TIMEOUT` 秒（默认 300）无请求即卸载全部引擎。
-2. **显存压力自适应卸载**：GPU 可用显存低于 15GB 且引擎空闲超过 60s 冷却期时，立即卸载引擎释放显存（日志标记 `(vram pressure)`）。阈值与冷却期在 `app/services/asr/runtime/router.py` 的 `_LOW_VRAM_THRESHOLD_GB` / `_VRAM_PRESSURE_COOLDOWN_S` 中配置。
+| 场景 | 显存 |
+|------|------|
+| 基线（空载） | 0.86GB |
+| 仅 ASR 引擎 | ~6.0GB |
+| 完整服务（+ VAD / CAM++ / Paraformer / 标点） | ~8.7GB |
+| 显式请求词级时间戳（+ aligner） | ~12GB（峰值） |
+
+压缩手段（全部走 `.env`，不写死在 `models.json`）：
+
+- `QWEN_WARMUP_FORCED_ALIGNER=false`：对齐器（独立 vLLM 实例）不在启动时预热，首次 `word_timestamps=true` 请求才加载；`word_timestamps=true` 在首次加载后 aligner 会自动重试最大 20 次（间隔 10s）
+- `QWEN_KV_CACHE_MEMORY_BYTES=1610612736`：精确控制 KV cache，避免按 utilization 吃满显存
+- `QWEN_MAX_NUM_BATCHED_TOKENS=2048`：直接决定 encoder cache 预算
+- `QWEN_ENFORCE_EAGER=true`：关闭 CUDA graph / torch.compile，省约 0.5GB
+
+服务按两级策略释放显存，让位给同一 GPU 上的其他服务（如 ComfyUI）：
+
+1. **空闲自动卸载**：`QWEN_IDLE_UNLOAD_TIMEOUT` 秒无请求即卸载全部引擎（生产设 `900` = 15 分钟）。
+2. **显存压力自适应卸载**：GPU 可用显存低于 `QWEN_LOW_VRAM_THRESHOLD_GB`（默认 6GB）且引擎空闲超过 `QWEN_VRAM_PRESSURE_COOLDOWN_S`（默认 60s）时，立即卸载引擎释放显存（日志标记 `(vram pressure)`）。
 
 ## 从源码构建镜像
 
@@ -403,15 +439,15 @@ uv run python -m app.utils.download_models
 uv run python -m app.utils.download_models --export-dir ./models
 ```
 
-**模型目录结构**（两个渠道，全部在 `models/` 下，随 compose 挂载持久化）：
+**模型目录结构**（统一放在 `/data1/models`，不放在项目目录内）：
 
 ```text
-models/
-├── huggingface/          # Qwen 系列（HuggingFace 渠道，约 6.2GB 总量）
-│   └── hub/models--Qwen--Qwen3-ASR-1.7B/           # 主模型 ~4.4GB
-│   └── hub/models--Qwen--Qwen3-ForcedAligner-0.6B/ # 词级时间戳对齐器 ~1.8GB
-└── modelscope/           # FunASR/CAM++/VAD 系列（ModelScope 渠道，约 2GB 总量）
-    └── hub/models/
+/data1/models/
+├── Confucius4-R2T2/            # 默认 ASR 主模型 ~3.9GB（bf16）
+├── Qwen3-ForcedAligner-0.6B/   # 词级时间戳对齐器 ~1.8GB（懒加载）
+├── huggingface/                # HuggingFace 缓存（HF_HOME）
+└── modelscope/
+    └── hub/models/             # MODELSCOPE_CACHE=/data1/models/modelscope/hub
         ├── iic/speech_paraformer-large_...          # 中文实时流式 ~849MB
         ├── iic/punc_ct-transformer_...（×2）        # 离线/实时标点
         ├── iic/speech_campplus_speaker-diarization_common  # 说话人分离
@@ -420,30 +456,17 @@ models/
         └── damo/speech_fsmn_vad_...                 # VAD ~69MB
 ```
 
-> 完整模型用途与使用场景见 README「模型清单」章节。离线部署时整体拷贝
-> `models/` 目录即可；`.gitignore` 已忽略 `models/`（模型不随代码库分发）。
+> 完整模型用途与使用场景见 README「模型清单」章节。换模型或换路径只改 `.env`
+> 的 `QWEN3_ASR_MODEL_PATH` / `QWEN3_FORCED_ALIGNER_PATH` / `MODELSCOPE_CACHE` /
+> `HF_HOME`（`models.json` 用 `${VAR:-default}` 占位符引用），无需改代码。
 
-离线部署时，推荐目录结构：
-
-```text
-./models/
-  modelscope/
-  huggingface/
-```
-
-然后保持与 compose 文件一致的挂载：
-
-```yaml
-volumes:
-  - ./models/modelscope:/root/.cache/modelscope
-  - ./models/huggingface:/root/.cache/huggingface
-  - ./data:/app/data
-```
+离线部署时，把上述 `/data1/models` 整体拷贝到目标机器，并在 `.env` 中把
+`QWEN3_ASR_MODEL_PATH` / `QWEN3_FORCED_ALIGNER_PATH` / `MODELSCOPE_CACHE` /
+`HF_HOME` 指向对应路径即可。
 
 ## 环境变量配置
 
-复制 `.env.example` 为 `.env`，仅修改其中已说明的公开变量。GPU 和 CPU
-Compose 文件是运行时配置的唯一来源；其余调优参数保留代码默认值。
+复制 `.env.example` 为 `.env`：**`.env` 是运行时配置（含所有运维调优参数）的唯一来源**，不需要改 `models.json` 或代码。端口、显存、并发、卸载策略全部在此调整，改完重启服务即生效（`start.py` 每次启动都执行 `load_dotenv()`）。
 
 ### 声纹数据库配置
 
@@ -606,7 +629,7 @@ nvidia-smi --query-gpu=memory.used --format=csv,noheader
 
 - CPU: 4 核
 - 内存: 16GB
-- GPU: NVIDIA GPU (16GB+ 显存)
+- GPU: NVIDIA GPU (8GB+ 显存；启用词级时间戳约需 12GB)
 - 磁盘: 20GB
 
 ## 故障排除
@@ -615,7 +638,7 @@ nvidia-smi --query-gpu=memory.used --format=csv,noheader
 
 | 问题 | 症状 | 解决方案 |
 |------|------|----------|
-| GPU 内存不足 | CUDA OOM 错误 | 使用 `qwen3-asr-0.6b` 或部署 CPU 镜像 |
+| GPU 内存不足 | CUDA OOM 错误 | 调低 `QWEN_KV_CACHE_MEMORY_BYTES` / `QWEN_MAX_NUM_SEQS`，或使用 `qwen3-asr-0.6b`，或部署 CPU 镜像 |
 | 模型加载失败 / 缓慢 | 本地模型缓存缺失 | 先运行 `./scripts/prepare-models.sh` 或 `uv run python -m app.utils.download_models` 预准备模型 |
 | 端口被占用 | 端口冲突错误 | 修改端口映射：`"8080:8000"` |
 | 说话人分离失败 | CAM++ 模型错误 | 检查模型是否完整下载，显存是否充足 |

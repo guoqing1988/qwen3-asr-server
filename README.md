@@ -48,23 +48,24 @@
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # 克隆并安装依赖
-git clone <your-repo> && cd qwen3-asr
+git clone <your-repo> && cd qwen3-asr-server
 uv venv --python 3.12
 uv sync
 
-# 配置环境变量
-cp .env.example .env  # 按需修改（PORT, MODELSCOPE_CACHE, HF_HOME 等）
+# 配置环境变量（端口、模型路径等全部由 .env 驱动，不写死在代码里）
+cp .env.example .env
+# 模型统一放在 /data1/models（不在项目目录内），例如：
+#   ASR 主模型       QWEN3_ASR_MODEL_PATH=/data1/models/Confucius4-R2T2
+#   词级时间戳对齐器  QWEN3_FORCED_ALIGNER_PATH=/data1/models/Qwen3-ForcedAligner-0.6B
+#   ModelScope 模型  MODELSCOPE_CACHE=/data1/models/modelscope/hub
 
-# 修正 Docker 遗留的模型文件权限（如有）
-sudo chown -R $(whoami):$(whoami) models/ logs/ temp/ data/
-
-# 注册并启动服务
-sudo ln -s /data/www/qwen3-asr/qwen3-asr.service /etc/systemd/system/
+# 注册并启动服务（软链接方式：改仓库里的 unit 文件后 daemon-reload 即生效）
+sudo ln -sfn "$(pwd)/qwen3-asr.service" /etc/systemd/system/qwen3-asr.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now qwen3-asr
 ```
 
-服务访问地址：
+服务访问地址（端口由 `.env` 的 `PORT` 决定）：
 - **API 端点**: `http://localhost:9101`
 - **API 文档**: `http://localhost:9101/docs`
 
@@ -211,6 +212,7 @@ python start.py
 - `macOS / Apple Silicon` 也使用 vendored `QwenASR` Rust
 - macOS / Apple Silicon 默认总是 `qwen3-asr-0.6b`
 - 在 macOS 上，只有设置 `QWEN3_ASR_MODEL=qwen3-asr-1.7b` 时才会使用 `qwen3-asr-1.7b`
+- 默认离线模型为 `qwen3-asr-confucius4-r2t2`（Confucius4-R2T2，CUDA vLLM 路径）
 - `word_timestamps=true` 在当前离线 CUDA 与 CPU Rust 路径下可用
 - WebSocket 流式路径当前不返回词级时间戳
 - CAM++ 说话人分离仍然必须保留，并继续跟随 `DEVICE`；在 CPU 上的主要热点仍是 speaker verification embedding
@@ -239,7 +241,7 @@ python start.py
 ### HTTP 转写接口对比
 
 两个离线转写端点都是**同步**接口（提交完整音频后等待一次返回完整结果），
-均走 qwen3-asr-1.7b，支持说话人分离、声纹命名与词级时间戳。真正的流式是
+均走默认离线模型（`qwen3-asr-confucius4-r2t2`），支持说话人分离、声纹命名与词级时间戳。真正的流式是
 WebSocket 端点（见下文）：
 
 | 维度 | `/stream/v1/asr`（阿里云兼容） | `/v1/audio/transcriptions`（OpenAI 兼容） |
@@ -523,6 +525,7 @@ asyncio.run(main())
 
 | 模型 ID              | 名称              | 说明                                     | 特性      |
 | -------------------- | ----------------- | ---------------------------------------- | --------- |
+| `qwen3-asr-confucius4-r2t2` | Confucius4-R2T2 | **默认模型**。网易有道实时 ASR（`models.json` 中 `default: true`）；CUDA 使用 vLLM | 离线/实时 |
 | `qwen3-asr-1.7b`   | Qwen3-ASR 1.7B    | 高性能多语言 ASR；CUDA 使用 vLLM | 离线/实时 |
 | `qwen3-asr-0.6b`   | Qwen3-ASR 0.6B    | 轻量版多语言 ASR；CUDA 使用 vLLM，CPU/macOS 使用 Rust backend | 离线/实时 |
 
@@ -533,49 +536,48 @@ asyncio.run(main())
 | `paraformer-large` | FunASR realtime | 中文 WebSocket 实时识别栈，包含实时标点链路 |
 
 **运行时选择:**
-- **显存 >= 32GB**: 选择 `qwen3-asr-1.7b`
-- **显存 < 32GB**: 选择 `qwen3-asr-0.6b`
-- **无 CUDA**: 选择基于 vendored Rust 的 `qwen3-asr-0.6b`
-- **macOS / Apple Silicon**: 无论内存大小多少，默认都选择 `qwen3-asr-0.6b`
-- **环境变量覆盖**: 设置 `QWEN3_ASR_MODEL=qwen3-asr-1.7b` 或 `QWEN3_ASR_MODEL=qwen3-asr-0.6b` 可跳过自动选择
+- **默认**：`qwen3-asr-confucius4-r2t2`（显存需求低：24GB 卡实测仅 ASR 引擎约 6.0GB，含 VAD/声纹/Paraformer/标点完整栈约 8.7GB）
+- **显存紧张 / 纯 CPU / macOS**: 选择基于 vendored Rust 的 `qwen3-asr-0.6b`
+- **环境变量覆盖**: 设置 `QWEN3_ASR_MODEL=qwen3-asr-confucius4-r2t2`、`qwen3-asr-1.7b` 或 `qwen3-asr-0.6b` 可跳过自动选择
+- 模型本地路径可用 `QWEN3_ASR_MODEL_PATH` / `QWEN3_FORCED_ALIGNER_PATH` 覆盖（`models.json` 支持 `${VAR:-default}` 占位符）
 - `paraformer-large` 实时能力始终为 WebSocket 流式准备
 
 启动时会先检测当前运行计划所需模型；如果本地缓存缺失，会自动下载。离线部署可显式设置 `HF_HUB_OFFLINE=1` 并提前准备模型缓存。
 
 ## 模型清单
 
-所有运行时模型缓存在项目 `models/` 目录下并挂载进容器，分为两个渠道：
+所有运行时模型统一放在 `/data1/models/`（路径全部可通过 `MODELSCOPE_CACHE`、`HF_HOME`、`QWEN3_ASR_MODEL_PATH`、`QWEN3_FORCED_ALIGNER_PATH` 调整），分为两个渠道：
 
 | 模型 | 大小 | 渠道与路径 | 用途 |
 |------|------|-----------|------|
-| Qwen3-ASR 1.7B | ~4.4GB | HF：`models/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B` | 离线转写、`/ws/v1/asr/qwen` 流式（多语言） |
-| Qwen3-ForcedAligner 0.6B | ~1.8GB | HF：`models/huggingface/hub/models--Qwen--Qwen3-ForcedAligner-0.6B` | 词级时间戳（离线 `word_timestamps=true`） |
-| Paraformer Large | ~849MB | MS：`models/modelscope/hub/models/iic/speech_paraformer-large_...` | `/ws/v1/asr` + `/ws/v1/asr/funasr`（中文实时流式） |
-| 标点（离线） | ~300MB | MS：`models/modelscope/hub/models/iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch` | 离线/流式标点 |
-| 标点（实时） | ~300MB | MS：`models/modelscope/hub/models/iic/punc_ct-transformer_..._vad_realtime-...` | FunASR 流式路径实时标点 |
-| CAM++ 说话人分离 | ~300MB | MS：`models/modelscope/hub/models/iic/speech_campplus_speaker-diarization_common` | 说话人分离（离线） |
-| CAM++ 声纹验证 | ~90MB | MS：`models/modelscope/hub/models/damo/speech_campplus_sv_zh-cn_16k-common` | 说话人聚类 + 声纹匹配 |
-| CAM++ SCL | ~90MB | MS：`models/modelscope/hub/models/damo/speech_campplus-transformer_scl_zh-cn_16k-common` | 说话人聚类 |
-| VAD（FSMN） | ~69MB | MS：`models/modelscope/hub/models/damo/speech_fsmn_vad_zh-cn-16k-common-pytorch` | 语音活动检测、音频切分 |
+| Confucius4-R2T2 | ~3.9GB | 本地：`/data1/models/Confucius4-R2T2` | **默认**离线转写、`/ws/v1/asr/qwen` 流式（多语言） |
+| Qwen3-ForcedAligner 0.6B | ~1.8GB | 本地：`/data1/models/Qwen3-ForcedAligner-0.6B` | 词级时间戳（离线 `word_timestamps=true`，懒加载） |
+| Paraformer Large | ~849MB | MS：`/data1/models/modelscope/hub/models/iic/speech_paraformer-large_...` | `/ws/v1/asr` + `/ws/v1/asr/funasr`（中文实时流式） |
+| 标点（离线） | ~300MB | MS：`/data1/models/modelscope/hub/models/iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch` | 离线/流式标点 |
+| 标点（实时） | ~300MB | MS：`/data1/models/modelscope/hub/models/iic/punc_ct-transformer_..._vad_realtime-...` | FunASR 流式路径实时标点 |
+| CAM++ 说话人分离 | ~300MB | MS：`/data1/models/modelscope/hub/models/iic/speech_campplus_speaker-diarization_common` | 说话人分离（离线） |
+| CAM++ 声纹验证 | ~90MB | MS：`/data1/models/modelscope/hub/models/damo/speech_campplus_sv_zh-cn_16k-common` | 说话人聚类 + 声纹匹配 |
+| CAM++ SCL | ~90MB | MS：`/data1/models/modelscope/hub/models/damo/speech_campplus-transformer_scl_zh-cn_16k-common` | 说话人聚类 |
+| VAD（FSMN） | ~69MB | MS：`/data1/models/modelscope/hub/models/damo/speech_fsmn_vad_zh-cn-16k-common-pytorch` | 语音活动检测、音频切分 |
 
 **使用场景指引**：
 
 - **中文实时流式**（低延迟 + 实时标点）：FunASR 路径使用 Paraformer Large + 实时标点模型（ModelScope 渠道）
-- **多语言 / 离线 / 词级时间戳**：Qwen3-ASR 1.7B + ForcedAligner（HuggingFace 渠道）
+- **多语言 / 离线 / 词级时间戳**：Confucius4-R2T2 + ForcedAligner
 - **说话人分离与声纹**（仅离线接口）：CAM++ 系列模型（ModelScope 渠道）
-- **下载行为**：启动时自动补下缺失模型（ModelScope 模型走 `modelscope.cn`，Qwen 模型走 HuggingFace 或 `HF_ENDPOINT` 镜像）；完全离线部署先执行一次 `./scripts/prepare-models.sh` 并拷贝 `models/` 目录
+- **下载行为**：启动时自动补下缺失模型（ModelScope 模型走 `modelscope.cn`，Qwen 模型走 HuggingFace 或 `HF_ENDPOINT` 镜像）；完全离线部署请提前把模型放到 `/data1/models` 并配好上述路径变量
 
 **接口 × 模型对应**：
 
 | 接口 | 模型 |
 |------|------|
-| `POST /v1/audio/transcriptions` | qwen3-asr-1.7b |
-| `POST /stream/v1/asr` | qwen3-asr-1.7b |
+| `POST /v1/audio/transcriptions` | qwen3-asr-confucius4-r2t2 |
+| `POST /stream/v1/asr` | qwen3-asr-confucius4-r2t2 |
 | `GET /v1/models`、`health`、`/stream/v1/asr/models` | 只读查询，不跑推理 |
-| `/ws/v1/asr/qwen` | qwen3-asr-1.7b |
+| `/ws/v1/asr/qwen` | qwen3-asr-confucius4-r2t2 |
 | `/ws/v1/asr`、`/ws/v1/asr/funasr` | paraformer-large（中文实时） |
 
-所有 HTTP 转写接口共用默认离线模型（`qwen3-asr-1.7b`，可用
+所有 HTTP 转写接口共用默认离线模型（`qwen3-asr-confucius4-r2t2`，可用
 `QWEN3_ASR_MODEL=qwen3-asr-0.6b` 覆盖）；Paraformer 只服务于两个
 FunASR 兼容的 WebSocket 端点。
 
@@ -626,19 +628,32 @@ curl -X DELETE 'http://localhost:9101/api/v1/voiceprint-speakers/{speaker_id}'
 
 | 变量                               | 默认值       | 说明                                            |
 | ---------------------------------- | ------------ | ----------------------------------------------- |
-| `PORT` | `8000` | 服务监听端口（本地 systemd 运行时设为 `9101`） |
+| `PORT` | `8000` | 服务监听端口（本地部署按需设置，可随意修改） |
 | `DEVICE` | `auto` | 推理设备（`cuda:0`、`cpu`） |
 | `NGINX_PORT` | `9101` | Docker Compose 映射到宿主机的端口 |
 | `API_KEY` | - | API 认证密钥（可选，未配置时无需认证） |
 | `CUDA_VISIBLE_DEVICES` | `0` | GPU 设备列表，多卡用 `0,1,2,3` |
-| `QWEN3_ASR_MODEL` | 自动选择 | 强制选择 `qwen3-asr-1.7b` 或 `qwen3-asr-0.6b` |
+| `QWEN3_ASR_MODEL` | 自动选择 | 强制选择 `qwen3-asr-confucius4-r2t2`、`qwen3-asr-1.7b` 或 `qwen3-asr-0.6b` |
+| `QWEN3_ASR_MODEL_PATH` | `netease-youdao/Confucius4-R2T2` | ASR 主模型路径（本地绝对路径或 HF 仓库 id；`models.json` 用 `${VAR:-default}` 引用） |
+| `QWEN3_FORCED_ALIGNER_PATH` | `Qwen/Qwen3-ForcedAligner-0.6B` | 词级时间戳对齐器路径 |
 | `HF_HUB_OFFLINE` | `0` | 离线部署且模型已准备好时设为 `1` |
 | `HF_ENDPOINT` | - | 在线镜像站；离线部署不要设置 |
-| `HF_HOME` | `~/.cache/huggingface` | HuggingFace 缓存目录（本地运行时设为项目的 `models/huggingface`） |
-| `MODELSCOPE_CACHE` | `~/.cache/modelscope/hub/models` | ModelScope 模型缓存路径（本地运行时设为项目的 `models/modelscope/hub/models`） |
-| `QWEN_GPU_MEMORY_UTILIZATION` | 自动计算 | 主 ASR 模型的 vLLM 显存利用率（0.0-1.0）。默认按 `12GB / 总显存` 自动计算；调低可减少常驻显存 |
+| `HF_HOME` | `~/.cache/huggingface` | HuggingFace 缓存目录（本项目设为 `/data1/models/huggingface`） |
+| `MODELSCOPE_CACHE` | `~/.cache/modelscope/hub/models` | ModelScope 模型缓存根目录（本项目设为 `/data1/models/modelscope/hub`，库内部会再拼 `/models/<id>`） |
+| `QWEN_GPU_MEMORY_UTILIZATION` | 自动计算 | 主 ASR 模型的 vLLM 显存利用率（0.0-1.0）。运维参数一律走 `.env`（不再写死在 `models.json`）；显式设置优先于自动估算 |
+| `QWEN_KV_CACHE_MEMORY_BYTES` | - | KV cache 精确字节数（如 `1610612736` = 1.5GiB）。设置后 vLLM 不再按 utilization 吃满显存 |
+| `QWEN_MAX_NUM_SEQS` | vLLM 默认 | 最大并发序列数（本项目设 `5`，即 5 并发） |
+| `QWEN_MAX_NUM_BATCHED_TOKENS` | vLLM 默认 | 单批最大 token 数（同时是 encoder cache 预算，本项目设 `2048`） |
+| `QWEN_MAX_MODEL_LEN` | `4096` | 上下文长度上限 |
+| `QWEN_ENFORCE_EAGER` | `false` | 关闭 CUDA graph / torch.compile，约省 0.5GB 显存（本项目设 `true`） |
 | `QWEN_FORCE_ALIGNER_GPU_MEMORY_UTILIZATION` | 继承主模型 | forced aligner（词级时间戳）vLLM 实例的显存利用率（0.0-1.0） |
-| `QWEN_IDLE_UNLOAD_TIMEOUT` | `300` | 无请求超过该秒数后卸载 vLLM 引擎释放显存；`0` 禁用空闲卸载 |
+| `QWEN_FORCE_ALIGNER_MAX_MODEL_LEN` | - | forced aligner 的 `max_model_len`（本项目设 `2048`） |
+| `QWEN_FORCED_ALIGNER_ENABLED` | `true` | 是否启用 forced aligner（`false` 则词级时间戳不可用） |
+| `QWEN_WARMUP_FORCED_ALIGNER` | `false` | 是否在启动时预热 aligner。`false` 时改为首次 `word_timestamps=true` 请求才懒加载（启动显存 16GB → 6GB 的关键） |
+| `QWEN_STREAM_MAX_NEW_TOKENS` | `32` | 流式单 chunk 最大生成 token 数（官方实时推荐 `2`，越小出字延迟越低；客户端可在 start 消息覆盖） |
+| `QWEN_IDLE_UNLOAD_TIMEOUT` | `300` | 无请求超过该秒数后卸载 vLLM 引擎释放显存；`0` 禁用（本项目设 `900` = 15 分钟） |
+| `QWEN_LOW_VRAM_THRESHOLD_GB` | `6.0` | 可用显存低于该值且引擎空闲时触发显存压力卸载 |
+| `QWEN_VRAM_PRESSURE_COOLDOWN_S` | `60` | 显存压力卸载所需的引擎空闲秒数 |
 | `ASR_DEFAULT_HOTWORDS` | （空） | 服务端预设热词（英文逗号分隔，建议 ≤512 字符），与请求热词（OpenAI `prompt` / 原生 `vocabulary_id`）合并后注入识别上下文；热词为倾向性采纳而非强制替换 |
 | `VOICEPRINT_ENABLED` | `true` | 是否启用 ASR 结果声纹身份匹配 |
 | `VOICEPRINT_DB_PATH` | `./data/voiceprints.sqlite3` | SQLite + sqlite-vec 声纹数据库路径 |
@@ -646,16 +661,34 @@ curl -X DELETE 'http://localhost:9101/api/v1/voiceprint-speakers/{speaker_id}'
 
 ### 显存控制与空闲卸载
 
-CUDA vLLM 运行时按显存利用率比例预分配显存（默认 `12GB / 总显存`，上限 0.95）。在 48GB 显卡上，主引擎约预留 12GB，forced aligner 还会再预留一份。要降低常驻显存，可在 `.env` 中调低比例：
+CUDA vLLM 运行时可用以下手段压缩常驻显存（全部由 `.env` 驱动）：
 
 ```dotenv
-QWEN_GPU_MEMORY_UTILIZATION=0.20
-QWEN_FORCE_ALIGNER_GPU_MEMORY_UTILIZATION=0.15
+QWEN_GPU_MEMORY_UTILIZATION=0.35
+QWEN_KV_CACHE_MEMORY_BYTES=1610612736   # 1.5GiB，精确控制 KV cache
+QWEN_MAX_NUM_SEQS=5
+QWEN_MAX_NUM_BATCHED_TOKENS=2048
+QWEN_MAX_MODEL_LEN=4096
+QWEN_ENFORCE_EAGER=true
+QWEN_WARMUP_FORCED_ALIGNER=false        # aligner 懒加载
 ```
 
-**空闲卸载**：设置 `QWEN_IDLE_UNLOAD_TIMEOUT`（默认 `300` 秒）后，后台监控会在连续无请求超过该时长时卸载 vLLM 引擎（主模型 + forced aligner），终止其 EngineCore 子进程并将显存归还系统。下一次请求会自动触发懒加载重建，约需 30-60 秒。正在执行或排队等待引擎的请求不会被中途卸载，监控仅在引擎完全空闲时触发。设置 `QWEN_IDLE_UNLOAD_TIMEOUT=0` 可让模型常驻不卸载。
+**forced aligner 懒加载**：aligner 是独立的 vLLM 实例（约 3GB）。`QWEN_WARMUP_FORCED_ALIGNER=false` 时不再于启动阶段预热，只在真正收到 `word_timestamps=true` 的请求时才加载——这是常规启动显存从 16GB 降到 6GB 的关键。
 
-> **注意**：显存利用率调得过低会导致 vLLM 启动失败（例如 48GB 卡上主引擎低于约 0.16、aligner 低于约 0.12 时，扣除权重后无剩余空间分配 KV cache）。
+**实测显存**（RTX 4090 24GB，`CUDA_VISIBLE_DEVICES=7`）：
+
+| 场景 | 显存 |
+|------|------|
+| 基线（空载） | 0.86GB |
+| 仅 ASR 引擎（Confucius4-R2T2） | ~6.0GB |
+| 完整服务（+ VAD / CAM++ / Paraformer / 标点） | ~8.7GB |
+| 显式请求词级时间戳（+ aligner） | ~12GB（峰值） |
+
+**空闲卸载**：设置 `QWEN_IDLE_UNLOAD_TIMEOUT` 后，后台监控会在连续无请求超过该时长时卸载 vLLM 引擎（主模型 + forced aligner），终止其 EngineCore 子进程并将显存归还系统。下一次请求会自动触发懒加载重建，约需 30–60 秒。正在执行或排队等待引擎的请求不会被中途卸载，监控仅在引擎完全空闲时触发。设置 `0` 可让模型常驻不卸载；生产环境常用 `900`（15 分钟）。
+
+**显存压力卸载**：可用显存低于 `QWEN_LOW_VRAM_THRESHOLD_GB` 且引擎空闲超过 `QWEN_VRAM_PRESSURE_COOLDOWN_S` 时自动让位给其他进程。
+
+> **注意**：若不用 `QWEN_KV_CACHE_MEMORY_BYTES` 而只靠 utilization，调得过低会导致 vLLM 启动失败（主引擎低于约 0.16、aligner 低于约 0.12 时，扣除权重后无剩余空间分配 KV cache）。
 
 ## API 文档
 

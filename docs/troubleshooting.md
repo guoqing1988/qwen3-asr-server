@@ -44,7 +44,7 @@
 
 ### 现象
 
-- 推理后 GPU 占用 29GB（主进程 15GB + 两个 EngineCore 14GB），其他 GPU 服务（ComfyUI）可能 OOM
+- 早期默认配置下：推理后 GPU 占用 29GB（主进程 15GB + 两个 EngineCore 14GB），其他 GPU 服务（ComfyUI）可能 OOM
 - `torch.cuda.empty_cache()` 在推理后调用**无效**
 
 ### 结论
@@ -53,7 +53,9 @@
 - vLLM 0.19 双进程架构：主进程持有音频编码器（mm encoder）按 max_num_batched_tokens 预算预分配的活跃 buffer，非空闲块，`empty_cache` 释放不了
 - 引擎空闲卸载后主进程回落（2GB），证明非内存泄漏
 - `gpu_memory_utilization` 有下限：调太低报 `No available memory for the cache blocks` / `To serve at least one request ... (0.88 GiB KV cache is needed ...)`，启动失败。主引擎 48GB 卡下限约 0.16-0.20，对齐器因 encoder cache 开销大下限约 0.15
-- 解决：**显存压力自适应卸载**（可用显存 <15GB 且引擎空闲超 60s 时自动卸载让位）+ 空闲卸载兜底
+- 解决（两级）：
+  1. **启动即降显存**（2026-09-25 完成）：forced aligner 改懒加载 + KV cache 精确控制（`QWEN_KV_CACHE_MEMORY_BYTES`）+ `enforce_eager` + 降 `max_num_batched_tokens`，启动显存 16GB → 约 6GB
+  2. **运行时让位**：显存压力自适应卸载（可用显存 < `QWEN_LOW_VRAM_THRESHOLD_GB`（默认 6GB）且引擎空闲超 `QWEN_VRAM_PRESSURE_COOLDOWN_S`（默认 60s）时自动卸载）+ 空闲卸载兜底（`QWEN_IDLE_UNLOAD_TIMEOUT`，生产设 900s）
 
 ## 镜像体积排查
 
@@ -115,12 +117,12 @@ ERROR - 400 Client Error: Bad Request for url: https://www.modelscope.cn/api/v1/
 ERROR - CAM++ 模型加载失败: SegmentationClusteringPipeline: invalid model repo path
 ```
 
-**根因**：CAM++ 的 `configuration.json` 中子模型路径（`speaker_model`、`change_locator`、`vad_model`）仍指向 Docker 容器路径 `/root/.cache/modelscope/hub/models/damo/...`，本地运行时 `MODELSCOPE_CACHE` 指向 `/data/www/qwen3-asr/models/modelscope/hub/models/`，modelscope 在本地找不到这些路径时尝试联网解析。
+**根因**：CAM++ 的 `configuration.json` 中子模型路径（`speaker_model`、`change_locator`、`vad_model`）仍指向旧路径（Docker 容器路径 `/root/.cache/modelscope/hub/models/damo/...`，或缓存目录多一层 `models`），本地运行时 `MODELSCOPE_CACHE` 已变，modelscope 在本地找不到这些路径时会把绝对路径当 model id 去联网解析。
 
-**解决**：`fix_camplusplus_config()` 在每次启动时自动修正，支持从旧绝对路径中提取 model ID 再映射到当前 `MODELSCOPE_CACHE` 路径。若仍有问题：
+**解决**：`fix_camplusplus_config()` 在每次启动时自动修正——按路径末尾的 `<org>/<name>`（`damo` / `iic`）提取 model id，再用当前 `MODELSCOPE_CACHE` 重建。2026-09-25 修复了正则（原来只认 `/hub/models/damo/...`，匹配不到多一层 `models` 的旧路径）。若仍有问题：
 ```bash
 # 检查子模型目录权限（Docker 挂载的模型属 root）
-sudo chown -R $(whoami):$(whoami) /data/www/qwen3-asr/models/
+sudo chown -R $(whoami):$(whoami) /data1/models/
 ```
 
 ### 模型文件权限问题（Permission denied）
@@ -131,17 +133,17 @@ sudo chown -R $(whoami):$(whoami) /data/www/qwen3-asr/models/
 
 **解决**：
 ```bash
-sudo chown -R $(whoami):$(whoami) /data/www/qwen3-asr/models/
-sudo chown -R $(whoami):$(whoami) /data/www/qwen3-asr/logs/
-sudo chown -R $(whoami):$(whoami) /data/www/qwen3-asr/temp/
-sudo chown -R $(whoami):$(whoami) /data/www/qwen3-asr/data/
+sudo chown -R $(whoami):$(whoami) /data1/models/
+sudo chown -R $(whoami):$(whoami) /data1/www/qwen3-asr-server/logs/
+sudo chown -R $(whoami):$(whoami) /data1/www/qwen3-asr-server/temp/
+sudo chown -R $(whoami):$(whoami) /data1/www/qwen3-asr-server/data/
 ```
 
 ### 服务频繁重启（systemd StartLimit）
 
 **现象**：`systemctl status` 显示 `start limit hit`，服务不再自动重启。
 
-**根因**：服务配置了 `StartLimitBurst=3`，5 分钟内重启超过 3 次触发保护。
+**根因**：服务配置了 `StartLimitBurst=3`，5 分钟内重启超过 3 次触发保护。调试期间手动连续 `systemctl restart` 也会计数（不一定是启动失败）。注意这两个参数应写在 `[Unit]` 段（写在 `[Service]` 段不生效）。
 
 **解决**：
 ```bash
@@ -164,7 +166,7 @@ sudo systemctl start qwen3-asr
 
 ```bash
 # 1. 用全新进程复现导入失败，定位损坏模块
-cd /data/www/qwen3-asr
+cd /data1/www/qwen3-asr-server
 .venv/bin/python -c "from vllm._aiter_ops import rocm_aiter_ops"   # → bad marshal data
 
 # 2. 检查 pyc 文件时间戳（ctime=mtime 说明文件自生成后未变，损坏发生在写入时）
@@ -209,3 +211,37 @@ sudo systemctl restart qwen3-asr
 也可直接删除损坏的 pyc（导入时自动从源码重建，效果相同）。若损坏面较大，
 可对整个包清理缓存：`find .venv -name '__pycache__' -type d -exec rm -rf {} +`
 （缓存会自动重建，无数据损失）。
+
+## 2026-09-25：迁移 Confucius4-R2T2 并优化启动显存
+
+### 启动显存 16GB → 6GB
+
+**现象**：服务启动即占 16GB（主引擎 ~8GB + forced aligner ~8GB），而 5 并发场景没必要常驻 aligner。
+
+**根因**：`Qwen3ASREngine._warmup_forced_aligner()` 在启动时**无条件**预热 forced aligner（另一个 vLLM 实例）。
+
+**解决**（全部由 `.env` 驱动，不写死在 `models.json`）：
+- `QWEN_WARMUP_FORCED_ALIGNER=false`：aligner 改为首次 `word_timestamps=true` 请求时懒加载
+- `QWEN_KV_CACHE_MEMORY_BYTES=1610612736`（1.5GiB）：精确控制 KV cache，不再按 `gpu_memory_utilization` 吃满
+- `QWEN_MAX_NUM_BATCHED_TOKENS=2048`：直接决定 encoder cache 预算
+- `QWEN_ENFORCE_EAGER=true`：省 CUDA graph 约 0.5GB
+
+**实测**（RTX 4090 24GB，GPU7）：基线 0.86GB → 仅 ASR 引擎 6.0GB → 完整服务 8.87GB → 词级时间戳峰值 12.2GB。
+
+### 配置分层：models.json 只放模型定义，运维参数走 .env
+
+**踩坑**：早期把 `gpu_memory_utilization` 等运维参数写进 `models.json`，每次调显存都要改模型定义文件。
+
+**约定**：`models.json` 只放模型定义（路径、`max_model_len`、`max_inference_batch_size`、`forced_aligner_path`）；所有运维参数（显存、并发、卸载策略）走 `.env`。`models.json` 支持 `${VAR:-default}` 占位符，例如 `"offline": "${QWEN3_ASR_MODEL_PATH:-netease-youdao/Confucius4-R2T2}"`，换路径只改 `.env`。
+
+### systemd unit 用软链接 + 参数不要与 .env 重复
+
+**踩坑 1**：unit 里写了 `Environment="CUDA_VISIBLE_DEVICES=7"`，而 systemd 的 `Environment=` 优先级高于 `.env`（`load_dotenv()` 默认不覆盖已有环境变量），导致 `.env` 里配的 GPU 被架空。**unit 里只保留进程级开关**（`FUNASR_STARTUP_UI`、`PYTHONUNBUFFERED`），GPU / 端口 / 模型路径全部交给 `.env`。
+
+**踩坑 2**：调试期间频繁 `systemctl restart` 触发 `start-limit-hit`（见上一节）。
+
+**安装方式**：用软链接而非 `cp`，让仓库内 unit 成为唯一来源：
+```bash
+sudo ln -sfn /data1/www/qwen3-asr-server/qwen3-asr.service /etc/systemd/system/qwen3-asr.service
+sudo systemctl daemon-reload
+```
