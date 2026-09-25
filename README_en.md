@@ -463,7 +463,7 @@ is emitted and the text is confirmed. Latency tuning:
 | `chunk_size_sec` | 2.0 | First-char latency; lower (e.g. 1.0) for more real-time feel |
 | `unfixed_token_num` | 5 | Tail rollback tokens for boundary correction |
 | `unfixed_chunk_num` | 2 | Warm-up chunks before truncation is allowed |
-| `max_new_tokens` | 512 | Per-chunk generation cap (server default, configurable) |
+| `max_new_tokens` | 2048 | Per-chunk generation cap (server default, configurable) |
 | `max_new_tokens_initial` | 32 | Per-chunk generation cap during warm-up |
 | `warmup_chunks` | 8 | Number of warm-up chunks (first N use the initial cap) |
 
@@ -677,9 +677,12 @@ Settings in `.env.example`:
 | `QWEN_FORCE_ALIGNER_MAX_MODEL_LEN` | - | `max_model_len` for the forced aligner (this project uses `2048`) |
 | `QWEN_FORCED_ALIGNER_ENABLED` | `true` | Enable the forced aligner (`false` disables word-level timestamps) |
 | `QWEN_WARMUP_FORCED_ALIGNER` | `false` | Warm up the aligner at startup. When `false`, it is lazily loaded on the first `word_timestamps=true` request (key to cutting startup VRAM from 16GB to 6GB) |
-| `QWEN_STREAM_MAX_NEW_TOKENS` | `512` | Per-chunk generation cap for streaming. Each round re-runs the full accumulated audio (no KV-incremental decoding), so it must cover the whole accumulated text; too small truncates the text. **It is a cap, not a cost** (stops at EOS), so raising it does not add latency |
+| `QWEN_STREAM_MAX_NEW_TOKENS` | `2048` | Per-chunk generation cap for streaming. Each round re-runs the full accumulated audio (no KV-incremental decoding), so it must cover the whole accumulated text; too small truncates the text. **It is a cap, not a cost** (stops at EOS), so raising it does not add latency |
 | `QWEN_STREAM_MAX_NEW_TOKENS_INITIAL` | `32` | Generation cap during warm-up (first `QWEN_STREAM_WARMUP_CHUNKS` chunks) |
 | `QWEN_STREAM_WARMUP_CHUNKS` | `8` | Number of streaming warm-up chunks |
+| `QWEN_STREAM_SEGMENT_MAX_SEC` | `12` | **Sliding window**: max segment duration in seconds. On expiry the segment is finalized and a new one starts, keeping each decoding window constant regardless of session length (suited to hour/day-long realtime tasks) |
+| `QWEN_STREAM_SILENCE_SEC` | `2.0` | Silence threshold in seconds; accumulated silence beyond it finalizes the segment (natural sentence boundary preferred) |
+| `QWEN_STREAM_OVERLAP_SEC` | `1.0` | Inter-segment audio overlap in seconds: the new segment is primed with the previous segment's tail to reduce word loss on forced cuts; overlapping text is deduplicated (case-insensitive) |
 | `QWEN_IDLE_UNLOAD_TIMEOUT` | `300` | Unload vLLM engines to release VRAM after this many seconds without requests; `0` disables (this project uses `900`, i.e. 15 minutes) |
 | `QWEN_LOW_VRAM_THRESHOLD_GB` | `6.0` | Trigger VRAM-pressure unload when free VRAM drops below this value while engines are idle |
 | `QWEN_VRAM_PRESSURE_COOLDOWN_S` | `60` | Idle seconds required before a VRAM-pressure unload |

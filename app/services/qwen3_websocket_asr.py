@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 from fastapi import WebSocket, WebSocketDisconnect
 
+from app.core.config import settings
 from app.core.exceptions import create_error_response
 from app.core.executor import run_sync
 from app.services.asr.model_selection import validate_realtime_model_id
@@ -20,6 +21,35 @@ from app.services.asr.runtime import RuntimeEngineLease, get_runtime_router
 from app.utils.text_processing import normalize_asr_text
 
 logger = logging.getLogger(__name__)
+
+# 流式音频固定按 16kHz 处理；段/静音阈值以秒配置，此处换算为采样点数
+_SAMPLE_RATE = 16000
+
+
+def _strip_overlap(
+    previous_text: str,
+    current_text: str,
+    *,
+    max_chars: int = 120,
+    min_chars: int = 2,
+) -> str:
+    """去除 current_text 开头与 previous_text 结尾重叠的部分。
+
+    段间预置了重叠音频（QWEN_STREAM_OVERLAP_SEC），新段识别结果会在开头重复
+    上一段尾部内容；此处做字符级后缀/前缀匹配去重（中英混排均适用）。
+    """
+    current = current_text.strip()
+    previous = previous_text.strip()
+    if not current or not previous:
+        return current
+    limit = min(len(previous), len(current), max_chars)
+    # 大小写不敏感匹配：重叠音频处模型可能重排大小写（"Really" vs "really"）
+    previous_lower = previous.lower()
+    current_lower = current.lower()
+    for size in range(limit, min_chars - 1, -1):
+        if previous_lower.endswith(current_lower[:size]):
+            return current[size:].lstrip(" \t,，.。!！?？;；:：")
+    return current
 
 
 def _convert_audio(
@@ -68,9 +98,8 @@ class ConnectionContext:
     confirmed_segments: List[Dict[str, Any]] = field(default_factory=list)
     segment_index: int = 0
     last_partial_text: str = ""
-
-    SILENCE_THRESHOLD = 32000
-    MAX_BUFFER = 960000
+    # 上一段尾部音频：作为新段开头的重叠预置，减弱强制切段处的丢词
+    segment_tail: Optional[np.ndarray] = None
 
 
 class Qwen3ASRService:
@@ -99,10 +128,25 @@ class Qwen3ASRService:
         return np.sqrt(np.mean(audio**2)) >= 0.015
 
     def _need_truncate(self, ctx: ConnectionContext) -> bool:
-        return (
-            ctx.total_samples >= ctx.MAX_BUFFER
-            or ctx.silence_samples >= ctx.SILENCE_THRESHOLD
-        )
+        """段窗口控制：单段最长 QWEN_STREAM_SEGMENT_MAX_SEC 秒（保证解码窗口恒定，
+        不随会话时长增长），或累计静音达 QWEN_STREAM_SILENCE_SEC 秒（自然句边界优先）。"""
+        max_samples = int(settings.QWEN_STREAM_SEGMENT_MAX_SEC * _SAMPLE_RATE)
+        silence_limit = int(settings.QWEN_STREAM_SILENCE_SEC * _SAMPLE_RATE)
+        return ctx.total_samples >= max_samples or ctx.silence_samples >= silence_limit
+
+    def _extract_segment_tail(self, ctx: ConnectionContext) -> Optional[np.ndarray]:
+        """取本段已送入引擎音频的尾部 OVERLAP_SEC 秒，作为下一段的重叠预置。
+
+        Rust 后端的流状态没有 audio_accum，此处会返回 None（无重叠）。“
+        """
+        overlap_samples = int(settings.QWEN_STREAM_OVERLAP_SEC * _SAMPLE_RATE)
+        if overlap_samples <= 0:
+            return None
+        internal = getattr(ctx.streaming_state, "internal_state", None)
+        accumulated = getattr(internal, "audio_accum", None)
+        if not isinstance(accumulated, np.ndarray) or accumulated.size == 0:
+            return None
+        return accumulated[-overlap_samples:].copy()
 
     def _normalize_output_text(self, text: str, ctx: ConnectionContext) -> str:
         return normalize_asr_text(
@@ -136,6 +180,11 @@ class Qwen3ASRService:
                 ctx.streaming_state.last_text or "",
                 ctx,
             )
+            # 段间重叠音频会让新段开头重复上一段尾部文本，去重后再落定
+            previous_text = (
+                ctx.confirmed_segments[-1]["text"] if ctx.confirmed_segments else ""
+            )
+            segment_text = _strip_overlap(previous_text, segment_text)
             is_valid = len(segment_text.strip()) >= 3
 
             if is_valid:
@@ -176,6 +225,9 @@ class Qwen3ASRService:
             else:
                 logger.debug("[%s] Short segment filtered: %r", task_id, segment_text)
 
+            # 记录本段尾部音频，作为下一段的重叠预置
+            ctx.segment_tail = self._extract_segment_tail(ctx)
+
             ctx.audio_buffer = np.array([], dtype=np.float32)
             ctx.silence_samples = 0
             ctx.total_samples = 0
@@ -189,6 +241,7 @@ class Qwen3ASRService:
                 max_new_tokens=ctx.params.get("max_new_tokens"),
                 max_new_tokens_initial=ctx.params.get("max_new_tokens_initial"),
                 warmup_chunks=ctx.params.get("warmup_chunks"),
+                initial_audio=ctx.segment_tail,
             )
 
             if is_valid:
@@ -323,9 +376,12 @@ class Qwen3ASRService:
                         ctx.silence_samples += len(audio)
 
                     if self._need_truncate(ctx):
+                        silence_limit = int(
+                            settings.QWEN_STREAM_SILENCE_SEC * _SAMPLE_RATE
+                        )
                         reason = (
                             "silence"
-                            if ctx.silence_samples >= ctx.SILENCE_THRESHOLD
+                            if ctx.silence_samples >= silence_limit
                             else "max_duration"
                         )
                         await self._truncate(websocket, ctx, task_id, reason)
@@ -421,6 +477,11 @@ class Qwen3ASRService:
             final = self._normalize_output_text(
                 ctx.streaming_state.last_text or "", ctx
             )
+            # 末段同样可能因重叠预置而重复上一段尾部，需要去重
+            previous_text = (
+                ctx.confirmed_segments[-1]["text"] if ctx.confirmed_segments else ""
+            )
+            final = _strip_overlap(previous_text, final)
             if final.strip():
                 ctx.confirmed_segments.append(
                     {

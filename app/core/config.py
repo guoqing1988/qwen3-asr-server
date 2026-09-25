@@ -120,6 +120,12 @@ class Settings:
     QWEN_STREAM_MAX_NEW_TOKENS_INITIAL: int = 32
     # 流式识别：预热 chunk 数（前 N 个 chunk 使用 initial 值）
     QWEN_STREAM_WARMUP_CHUNKS: int = 8
+    # 流式：单段最大时长（秒）。超过即落定该段并开新段，保证解码窗口不随会话增长
+    QWEN_STREAM_SEGMENT_MAX_SEC: float = 12.0
+    # 流式：静音切段阈值（秒），累计静音超过该值即落定当前段（自然句边界优先）
+    QWEN_STREAM_SILENCE_SEC: float = 2.0
+    # 流式：段间重叠音频（秒），减弱强制切段处的丢词/断句
+    QWEN_STREAM_OVERLAP_SEC: float = 1.0
     # Forced aligner（词级时间戳）配置
     # 是否在启动完整性检查中要求 aligner 模型存在
     QWEN_FORCED_ALIGNER_ENABLED: bool = True
@@ -247,6 +253,17 @@ class Settings:
         )
         self.QWEN_STREAM_WARMUP_CHUNKS = int(
             os.getenv("QWEN_STREAM_WARMUP_CHUNKS", str(self.QWEN_STREAM_WARMUP_CHUNKS))
+        )
+        self.QWEN_STREAM_SEGMENT_MAX_SEC = float(
+            os.getenv(
+                "QWEN_STREAM_SEGMENT_MAX_SEC", str(self.QWEN_STREAM_SEGMENT_MAX_SEC)
+            )
+        )
+        self.QWEN_STREAM_SILENCE_SEC = float(
+            os.getenv("QWEN_STREAM_SILENCE_SEC", str(self.QWEN_STREAM_SILENCE_SEC))
+        )
+        self.QWEN_STREAM_OVERLAP_SEC = float(
+            os.getenv("QWEN_STREAM_OVERLAP_SEC", str(self.QWEN_STREAM_OVERLAP_SEC))
         )
 
         self.QWEN_FORCED_ALIGNER_ENABLED = (

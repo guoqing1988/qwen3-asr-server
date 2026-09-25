@@ -133,9 +133,12 @@ cp .env.example .env   # 如不存在则手动创建
 | `QWEN_FORCE_ALIGNER_GPU_MEMORY_UTILIZATION` | `0.20` | 对齐器显存占用比 |
 | `QWEN_FORCE_ALIGNER_MAX_MODEL_LEN` | `2048` | 对齐器上下文长度 |
 | `QWEN_WARMUP_FORCED_ALIGNER` | `false` | 不启动预热对齐器，改为首次词级时间戳请求时懒加载（启动显存 16GB→6GB 的关键） |
-| `QWEN_STREAM_MAX_NEW_TOKENS` | `512` | 流式单 chunk 生成上限（每轮全量重算，须覆盖整段累积文本；是上限而非耗时） |
+| `QWEN_STREAM_MAX_NEW_TOKENS` | `2048` | 流式单 chunk 生成上限（每轮全量重算，须覆盖整段累积文本；是上限而非耗时） |
 | `QWEN_STREAM_MAX_NEW_TOKENS_INITIAL` | `32` | 预热期单 chunk 生成上限 |
 | `QWEN_STREAM_WARMUP_CHUNKS` | `8` | 流式预热 chunk 数 |
+| `QWEN_STREAM_SEGMENT_MAX_SEC` | `12` | 滑动窗口：单段最大时长（秒），超时强制落定并开新段 |
+| `QWEN_STREAM_SILENCE_SEC` | `2.0` | 静音切段阈值（秒） |
+| `QWEN_STREAM_OVERLAP_SEC` | `1.0` | 段间重叠音频（秒），减弱强制切段处丢词 |
 | `QWEN_IDLE_UNLOAD_TIMEOUT` | `900` | 空闲卸载超时（秒），0 禁用；`900` = 15 分钟无请求自动卸载 |
 | `QWEN_LOW_VRAM_THRESHOLD_GB` | `6.0` | 显存压力卸载阈值 |
 

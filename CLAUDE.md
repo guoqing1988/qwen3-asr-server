@@ -71,8 +71,9 @@ Qwen3-ASR 服务（GPU 版）：Confucius4-R2T2（vLLM，默认且唯一 ASR 模
   - `QWEN_MAX_NUM_SEQS`（当前 5）/ `QWEN_MAX_NUM_BATCHED_TOKENS`（当前 2048）/ `QWEN_MAX_MODEL_LEN`（当前 4096）
   - `QWEN_ENFORCE_EAGER`（当前 true，省 CUDA graph 显存）
   - `QWEN_FORCE_ALIGNER_GPU_MEMORY_UTILIZATION`（当前 0.20）/ `QWEN_FORCE_ALIGNER_MAX_MODEL_LEN`（当前 2048）
-  - `QWEN_STREAM_MAX_NEW_TOKENS`（流式单 chunk 生成上限，当前 512；本项目每轮全量重算而非 KV 增量续写，该值须覆盖整段累积文本，且它是上限而非耗时，调大不影响出字延迟）
+  - `QWEN_STREAM_MAX_NEW_TOKENS`（流式单 chunk 生成上限，当前 2048；本项目每轮全量重算而非 KV 增量续写，该值须覆盖整段累积文本，且它是上限而非耗时，调大不影响出字延迟）
   - `QWEN_STREAM_MAX_NEW_TOKENS_INITIAL`（当前 32）/ `QWEN_STREAM_WARMUP_CHUNKS`（当前 8）：预热期生成上限与预热 chunk 数
+  - **滑动窗口**：`QWEN_STREAM_SEGMENT_MAX_SEC`（当前 12s，单段上限，超时强制落定）、`QWEN_STREAM_SILENCE_SEC`（当前 2s，静音优先落定）、`QWEN_STREAM_OVERLAP_SEC`（当前 1s，段间重叠音频 + 边界去重）——保证每轮解码窗口恒定，适合小时/天级长时实时任务（实测 52.5s 音频滞后从 6.2s 降至 0.1s）
 - **实测显存**（RTX 4090 24GB，`CUDA_VISIBLE_DEVICES=7`）：仅 ASR 引擎约 **6.0GB**；完整服务（含 VAD/CAM++/Paraformer/标点）约 **8.7GB**；显式请求词级时间戳时峰值约 12GB
 - `gpu_memory_utilization` 有下限：主引擎约 0.16-0.20，对齐器约 0.15（调低会 KV cache 不足启动失败）；已用 `QWEN_KV_CACHE_MEMORY_BYTES` 精确控制 KV cache
 

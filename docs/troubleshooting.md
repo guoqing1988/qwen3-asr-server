@@ -264,3 +264,22 @@ sudo systemctl daemon-reload
 **验证**：用 `/tmp/ws_dump.py` 逐 chunk 打印，8s 音频（`chunk_size_sec=0.16`）文本持续推进且与离线结果一致，处理速度 ≈0.156s/chunk（跟得上实时）。
 
 **回归测试**：`.venv/bin/python -m pytest tests/test_qwen3_stream_parse.py -v`（覆盖 `_parse_asr_output` 解析与 `_build_stream_prefix` 边界）。
+
+### 长时实时任务：解码窗口必须滑动（2026-09-25）
+
+**现象**：52.5s 连续语音（`chunk_size_sec=0.16`）流式转写，发送结束后服务端仍滞后 **6.2s（≈12%）** 才处理完。
+
+**根因**：每轮 `generate(prompt + prefix, audio=全部累积音频)` 是**全量重算**，prefill 开销随段内音频线性增长。原实现虽有分段机制，但单段上限硬编码 60s（`MAX_BUFFER=960000`）、静音阈值 2s（`SILENCE_THRESHOLD=32000`）——连续语音无静音时单段一直涨到 60s，窗口内后期严重落后，也不适合小时/天级实时任务。
+
+**改造（滑动窗口 + 段间重叠去重）**：
+
+- `QWEN_STREAM_SEGMENT_MAX_SEC`（默认 12s）：单段上限，超时强制落定并开新段 → 每轮解码窗口恒定，不随会话时长增长
+- `QWEN_STREAM_SILENCE_SEC`（默认 2s）：静音优先落定（自然句边界）
+- `QWEN_STREAM_OVERLAP_SEC`（默认 1s）：新段开头预置上一段尾部音频，减少强制切段处丢词；识别结果按字符级后缀/前缀匹配去重，**大小写不敏感**（重叠音频处模型可能重排大小写，如 `Really` vs `really`，敏感匹配会漏去重）
+- 硬编码的 `MAX_BUFFER` / `SILENCE_THRESHOLD` 类常量移除，全部走 `.env`
+
+**效果**：52.5s 音频滞后 **6.2s → 0.1s**，分 5 段，段边界重复文本被正确去除，`FULL` 文本连贯（如段边界 `really hard work` + `Really hard work getting...` → `getting our technology...`）。
+
+**回归测试**：`.venv/bin/python -m pytest tests/test_qwen3_stream_window.py -v`（`_strip_overlap` 中英文/大小写/边界，`_need_truncate` 阈值，`_extract_segment_tail` 尾部切片）。
+
+**残余限制**：单段内仍是全量重算，所以窗口大小直接决定单轮成本；若要进一步降延迟，需改用 vLLM 异步引擎做 KV 增量续写（大改造）。

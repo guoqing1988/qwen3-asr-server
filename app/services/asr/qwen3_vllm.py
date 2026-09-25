@@ -619,6 +619,7 @@ class Qwen3VLLMBackend:
         max_new_tokens: int = 32,
         max_new_tokens_initial: int = 32,
         warmup_chunks: int = 8,
+        initial_audio: np.ndarray | None = None,
     ) -> VLLMRealtimeState:
         normalized_language = _normalize_language_name(language) or ""
         return VLLMRealtimeState(
@@ -630,8 +631,12 @@ class Qwen3VLLMBackend:
             max_new_tokens=max_new_tokens,
             max_new_tokens_initial=max_new_tokens_initial,
             warmup_chunks=warmup_chunks,
+            audio_accum=(
+                np.asarray(initial_audio, dtype=np.float32)
+                if initial_audio is not None
+                else np.array([], dtype=np.float32)
+            ),
             audio_buffer=np.array([], dtype=np.float32),
-            audio_accum=np.array([], dtype=np.float32),
         )
 
     def _decode_stream(self, state: VLLMRealtimeState) -> VLLMRealtimeState:
