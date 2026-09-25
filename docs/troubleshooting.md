@@ -245,3 +245,22 @@ sudo systemctl restart qwen3-asr
 sudo ln -sfn /data1/www/qwen3-asr-server/qwen3-asr.service /etc/systemd/system/qwen3-asr.service
 sudo systemctl daemon-reload
 ```
+
+### 流式（实时转录）输出乱码 / 退化成标点
+
+**现象**：`/ws/v1/asr/qwen` 流式返回的文本是 `"language None"`、`"None"`、`"."`，而不是实际转写内容；同一音频的离线转写完全正常。
+
+**三个根因（2026-09-25 逐一定位）**：
+
+1. **prefix 语义错误（主因）**：`Qwen3VLLMBackend._decode_stream` 用 `raw_decoded` 的**最后 `unfixed_token_num` 个 token** 作为下一轮 prompt 前缀。这只有在「vLLM KV 增量续写」时才成立；本项目每轮都是 `generate(prompt + prefix, audio=累积音频)` 的**全量重算**，只给末尾 1 个 token 等于丢掉全部历史——文本逐轮丢内容，最后只剩 `.`。
+   修复：prefix 改为**已定稿历史**（完整 `raw_decoded` 去掉末尾 `unfixed_token_num` 个 token），抽出 `_build_stream_prefix()` 便于测试。
+
+2. **`max_new_tokens` 太小**：曾按「官方实时推荐 2」配置 `QWEN_STREAM_MAX_NEW_TOKENS=2`。本项目每轮全量重算，该值是「整段累积文本的生成上限」，给 2 连 `language X<asr_text>` 前缀都吐不完。
+   修复：默认改 `512`（**上限而非耗时**，遇 EOS 即停，不影响出字延迟），另加预热期参数 `QWEN_STREAM_MAX_NEW_TOKENS_INITIAL=32` / `QWEN_STREAM_WARMUP_CHUNKS=8`。
+
+3. **解析残留**：流式 prefix 用 `skip_special_tokens=False` 解码（必须保留 `<asr_text>` 以免解析失败），会带出 `|` 等标记字符；音频不足时模型还会把语言预测成字面量 `None`。
+   修复：`_parse_asr_output()` 清理 `|` 并将 `None/null` 视为无效，回退到请求指定语言。
+
+**验证**：用 `/tmp/ws_dump.py` 逐 chunk 打印，8s 音频（`chunk_size_sec=0.16`）文本持续推进且与离线结果一致，处理速度 ≈0.156s/chunk（跟得上实时）。
+
+**回归测试**：`.venv/bin/python -m pytest tests/test_qwen3_stream_parse.py -v`（覆盖 `_parse_asr_output` 解析与 `_build_stream_prefix` 边界）。

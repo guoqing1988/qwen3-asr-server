@@ -131,6 +131,8 @@ class Qwen3StreamingState:
     unfixed_chunk_num: int = 2
     unfixed_token_num: int = 5
     max_new_tokens: int = 32
+    max_new_tokens_initial: int = 32
+    warmup_chunks: int = 8
     language: Optional[str] = None
     chunk_count: int = 0
     last_text: str = ""
@@ -607,9 +609,13 @@ class Qwen3ASREngine(BaseASREngine):
                 last_language=language or "",
             )
         if self._backend == "vllm":
-            # 未显式指定时使用配置默认值（.env: QWEN_STREAM_MAX_NEW_TOKENS）
+            # 未显式指定时使用配置默认值（.env: QWEN_STREAM_*）
             if kwargs.get("max_new_tokens") in (None, ""):
                 kwargs["max_new_tokens"] = settings.QWEN_STREAM_MAX_NEW_TOKENS
+            if kwargs.get("max_new_tokens_initial") in (None, ""):
+                kwargs["max_new_tokens_initial"] = settings.QWEN_STREAM_MAX_NEW_TOKENS_INITIAL
+            if kwargs.get("warmup_chunks") in (None, ""):
+                kwargs["warmup_chunks"] = settings.QWEN_STREAM_WARMUP_CHUNKS
             streaming_state = self.model.init_streaming_state(context=context, language=language, **kwargs)
             return Qwen3StreamingState(
                 internal_state=streaming_state,
@@ -617,6 +623,8 @@ class Qwen3ASREngine(BaseASREngine):
                 unfixed_chunk_num=int(kwargs.get("unfixed_chunk_num", 2)),
                 unfixed_token_num=int(kwargs.get("unfixed_token_num", 5)),
                 max_new_tokens=int(kwargs["max_new_tokens"]),
+                max_new_tokens_initial=int(kwargs["max_new_tokens_initial"]),
+                warmup_chunks=int(kwargs["warmup_chunks"]),
                 language=language,
                 chunk_count=int(getattr(streaming_state, "chunk_id", 0)),
                 last_text=str(getattr(streaming_state, "text", "") or ""),

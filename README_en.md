@@ -463,6 +463,17 @@ is emitted and the text is confirmed. Latency tuning:
 | `chunk_size_sec` | 2.0 | First-char latency; lower (e.g. 1.0) for more real-time feel |
 | `unfixed_token_num` | 5 | Tail rollback tokens for boundary correction |
 | `unfixed_chunk_num` | 2 | Warm-up chunks before truncation is allowed |
+| `max_new_tokens` | 512 | Per-chunk generation cap (server default, configurable) |
+| `max_new_tokens_initial` | 32 | Per-chunk generation cap during warm-up |
+| `warmup_chunks` | 8 | Number of warm-up chunks (first N use the initial cap) |
+
+> **About `max_new_tokens` (measured on Confucius4)**: this project re-runs the
+> **full accumulated audio** every chunk (no official KV-incremental decoding),
+> so the value is the generation cap for the whole accumulated text and must be
+> large enough; setting it to `2` truncates the text each round until only
+> punctuation is left. It is a **cap, not a cost** (generation stops at EOS), so
+> raising it does not add latency — low latency comes from `chunk_size_sec`.
+> Server defaults are configurable via the `QWEN_STREAM_*` environment variables.
 
 **Streaming limitations**:
 - Both paths do **not** return word-level timestamps.
@@ -666,7 +677,9 @@ Settings in `.env.example`:
 | `QWEN_FORCE_ALIGNER_MAX_MODEL_LEN` | - | `max_model_len` for the forced aligner (this project uses `2048`) |
 | `QWEN_FORCED_ALIGNER_ENABLED` | `true` | Enable the forced aligner (`false` disables word-level timestamps) |
 | `QWEN_WARMUP_FORCED_ALIGNER` | `false` | Warm up the aligner at startup. When `false`, it is lazily loaded on the first `word_timestamps=true` request (key to cutting startup VRAM from 16GB to 6GB) |
-| `QWEN_STREAM_MAX_NEW_TOKENS` | `32` | Max tokens generated per streaming chunk (the official realtime recipe uses `2`; lower means less output latency, overridable per request) |
+| `QWEN_STREAM_MAX_NEW_TOKENS` | `512` | Per-chunk generation cap for streaming. Each round re-runs the full accumulated audio (no KV-incremental decoding), so it must cover the whole accumulated text; too small truncates the text. **It is a cap, not a cost** (stops at EOS), so raising it does not add latency |
+| `QWEN_STREAM_MAX_NEW_TOKENS_INITIAL` | `32` | Generation cap during warm-up (first `QWEN_STREAM_WARMUP_CHUNKS` chunks) |
+| `QWEN_STREAM_WARMUP_CHUNKS` | `8` | Number of streaming warm-up chunks |
 | `QWEN_IDLE_UNLOAD_TIMEOUT` | `300` | Unload vLLM engines to release VRAM after this many seconds without requests; `0` disables (this project uses `900`, i.e. 15 minutes) |
 | `QWEN_LOW_VRAM_THRESHOLD_GB` | `6.0` | Trigger VRAM-pressure unload when free VRAM drops below this value while engines are idle |
 | `QWEN_VRAM_PRESSURE_COOLDOWN_S` | `60` | Idle seconds required before a VRAM-pressure unload |

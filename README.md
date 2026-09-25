@@ -456,6 +456,15 @@ asyncio.run(main())
 | `chunk_size_sec` | 2.0 | 出字延迟；调小（如 1.0）更实时 |
 | `unfixed_token_num` | 5 | 句尾回滚修正 token 数 |
 | `unfixed_chunk_num` | 2 | 允许截断前的预热 chunk 数 |
+| `max_new_tokens` | 512 | 单 chunk 生成上限（服务端默认，可用环境变量覆盖） |
+| `max_new_tokens_initial` | 32 | 预热期单 chunk 生成上限 |
+| `warmup_chunks` | 8 | 预热 chunk 数（前 N 个 chunk 用 initial 值） |
+
+> **`max_new_tokens` 说明（Confucius4 实测）**：本项目 vLLM 流式每轮都对
+> **累积音频**做全量重算（不是官方的 KV 增量续写），因此该值是「整段累积文本的
+> 生成上限」，必须足够大；给 `2` 会让文本逐轮被截断、退化成标点。它是**上限而非
+> 耗时**（模型遇 EOS 即停），调大不影响出字延迟——低延迟靠 `chunk_size_sec`。
+> 服务端默认值可用 `.env` 的 `QWEN_STREAM_*` 调整。
 
 **流式限制**：
 - 两条路径都不返回词级时间戳
@@ -650,7 +659,9 @@ curl -X DELETE 'http://localhost:9101/api/v1/voiceprint-speakers/{speaker_id}'
 | `QWEN_FORCE_ALIGNER_MAX_MODEL_LEN` | - | forced aligner 的 `max_model_len`（本项目设 `2048`） |
 | `QWEN_FORCED_ALIGNER_ENABLED` | `true` | 是否启用 forced aligner（`false` 则词级时间戳不可用） |
 | `QWEN_WARMUP_FORCED_ALIGNER` | `false` | 是否在启动时预热 aligner。`false` 时改为首次 `word_timestamps=true` 请求才懒加载（启动显存 16GB → 6GB 的关键） |
-| `QWEN_STREAM_MAX_NEW_TOKENS` | `32` | 流式单 chunk 最大生成 token 数（官方实时推荐 `2`，越小出字延迟越低；客户端可在 start 消息覆盖） |
+| `QWEN_STREAM_MAX_NEW_TOKENS` | `512` | 流式单 chunk 生成上限。本项目每轮全量重算（非 KV 增量续写），该值须能覆盖整段累积文本，太小会把文本截断；**max_tokens 是上限而非耗时**（遇 EOS 即停），调大不影响出字延迟 |
+| `QWEN_STREAM_MAX_NEW_TOKENS_INITIAL` | `32` | 预热期（前 `QWEN_STREAM_WARMUP_CHUNKS` 个 chunk）的生成上限 |
+| `QWEN_STREAM_WARMUP_CHUNKS` | `8` | 流式预热 chunk 数 |
 | `QWEN_IDLE_UNLOAD_TIMEOUT` | `300` | 无请求超过该秒数后卸载 vLLM 引擎释放显存；`0` 禁用（本项目设 `900` = 15 分钟） |
 | `QWEN_LOW_VRAM_THRESHOLD_GB` | `6.0` | 可用显存低于该值且引擎空闲时触发显存压力卸载 |
 | `QWEN_VRAM_PRESSURE_COOLDOWN_S` | `60` | 显存压力卸载所需的引擎空闲秒数 |

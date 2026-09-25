@@ -110,9 +110,16 @@ class Settings:
     QWEN_KV_CACHE_MEMORY_BYTES: Optional[int] = None
     # forced aligner 的 max_model_len
     QWEN_FORCE_ALIGNER_MAX_MODEL_LEN: Optional[int] = None
-    # 流式识别单 chunk 最大生成 token 数（越小出字延迟越低，官方实时推荐 2）
-    QWEN_STREAM_MAX_NEW_TOKENS: int = 32
-
+    # 流式识别：预热之后单 chunk 最大生成 token 数上限。
+    # 注意：本项目 vLLM 流式每轮都对累积音频做全量重算（非 KV 增量续写），
+    # 该值必须够大以覆盖整段累积文本，否则输出会被截断/抖动。
+    # max_tokens 是上限而非耗时，模型遇到 EOS 即停，调大不影响出字延迟。
+    QWEN_STREAM_MAX_NEW_TOKENS: int = 512
+    # 流式识别：预热期（前 QWEN_STREAM_WARMUP_CHUNKS 个 chunk）的上限，
+    # 此时音频短、文本短，小值即可（但太小会让 `language X<asr_text>` 前缀出不来）
+    QWEN_STREAM_MAX_NEW_TOKENS_INITIAL: int = 32
+    # 流式识别：预热 chunk 数（前 N 个 chunk 使用 initial 值）
+    QWEN_STREAM_WARMUP_CHUNKS: int = 8
     # Forced aligner（词级时间戳）配置
     # 是否在启动完整性检查中要求 aligner 模型存在
     QWEN_FORCED_ALIGNER_ENABLED: bool = True
@@ -231,6 +238,15 @@ class Settings:
             os.getenv(
                 "QWEN_STREAM_MAX_NEW_TOKENS", str(self.QWEN_STREAM_MAX_NEW_TOKENS)
             )
+        )
+        self.QWEN_STREAM_MAX_NEW_TOKENS_INITIAL = int(
+            os.getenv(
+                "QWEN_STREAM_MAX_NEW_TOKENS_INITIAL",
+                str(self.QWEN_STREAM_MAX_NEW_TOKENS_INITIAL),
+            )
+        )
+        self.QWEN_STREAM_WARMUP_CHUNKS = int(
+            os.getenv("QWEN_STREAM_WARMUP_CHUNKS", str(self.QWEN_STREAM_WARMUP_CHUNKS))
         )
 
         self.QWEN_FORCED_ALIGNER_ENABLED = (

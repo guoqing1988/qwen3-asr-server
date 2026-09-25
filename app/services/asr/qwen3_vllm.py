@@ -83,20 +83,49 @@ def _build_chat_prompt(context: str = "", language: Optional[str] = None) -> str
     )
 
 
+def _build_stream_prefix(tokenizer: Any, raw_decoded: str, unfixed_token_num: int) -> str:
+    """构造流式解码的 prefix：已定稿的历史文本（去掉末尾 unfixed_token_num 个 token）。
+
+    本项目每轮都是「全量音频 + 全量文本重算」（无 vLLM KV 增量续写），prefix 必须
+    是完整历史；只取末尾 N 个 token 会丢掉全部历史，导致输出逐轮丢内容。
+
+    注：原始输出用 skip_special_tokens=False 解码，`<asr_text>` 等标记必须保留，
+    否则 `_parse_asr_output` 无法切分语言段与正文。
+    """
+    if not raw_decoded:
+        return ""
+    token_ids = tokenizer.encode(raw_decoded, add_special_tokens=False)
+    if unfixed_token_num > 0:
+        keep = token_ids[: -unfixed_token_num] if len(token_ids) > unfixed_token_num else []
+    else:
+        keep = token_ids
+    if not keep:
+        return ""
+    return tokenizer.decode(keep, skip_special_tokens=False).replace("\ufffd", "")
+
+
 def _build_alignment_prompt(tokens: list[str]) -> str:
     body = "<timestamp><timestamp>".join(tokens) + "<timestamp><timestamp>"
     return f"<|audio_start|><|audio_pad|><|audio_end|>{body}"
 
 
 def _parse_asr_output(raw_text: str, language: Optional[str]) -> tuple[str, str]:
+    """解析 ASR 输出（格式：`language <lang><asr_text><正文>`）。
+
+    流式路径的 prefix 用 skip_special_tokens=False 解码，语言段与正文首尾
+    可能残留 '|' 之类的标记字符，这里一并清理。
+    """
     text = (raw_text or "").strip()
     if "<asr_text>" in text:
         left, right = text.split("<asr_text>", 1)
-        detected = left.strip()
+        detected = left.strip().strip("|").strip()
         if detected.lower().startswith("language "):
-            detected = detected[9:].strip()
-        return detected or (language or ""), right.strip()
-    return (language or ""), text
+            detected = detected[len("language ") :].strip()
+        # 模型偶尔会把语言预测成字面量 None/null（音频不足时），视为无效
+        if detected.lower() in {"none", "null"}:
+            detected = ""
+        return detected or (language or ""), right.strip().strip("|").strip()
+    return (language or ""), text.strip("|").strip()
 
 
 def _split_alignment_units(text: str) -> list[str]:
@@ -235,6 +264,8 @@ class VLLMRealtimeState:
     unfixed_chunk_num: int
     unfixed_token_num: int
     max_new_tokens: int
+    max_new_tokens_initial: int = 32
+    warmup_chunks: int = 8
     chunk_id: int = 0
     text: str = ""
     raw_decoded: str = ""
@@ -586,6 +617,8 @@ class Qwen3VLLMBackend:
         unfixed_chunk_num: int = 2,
         unfixed_token_num: int = 5,
         max_new_tokens: int = 32,
+        max_new_tokens_initial: int = 32,
+        warmup_chunks: int = 8,
     ) -> VLLMRealtimeState:
         normalized_language = _normalize_language_name(language) or ""
         return VLLMRealtimeState(
@@ -595,18 +628,27 @@ class Qwen3VLLMBackend:
             unfixed_chunk_num=unfixed_chunk_num,
             unfixed_token_num=unfixed_token_num,
             max_new_tokens=max_new_tokens,
+            max_new_tokens_initial=max_new_tokens_initial,
+            warmup_chunks=warmup_chunks,
             audio_buffer=np.array([], dtype=np.float32),
             audio_accum=np.array([], dtype=np.float32),
         )
 
     def _decode_stream(self, state: VLLMRealtimeState) -> VLLMRealtimeState:
+        # prefix = 已定稿的历史文本（见 _build_stream_prefix 说明）；预热 chunk 内不定稿
         prefix = ""
         if state.chunk_id >= state.unfixed_chunk_num and state.raw_decoded:
-            token_ids = self._tokenizer.encode(state.raw_decoded, add_special_tokens=False)
-            rollback = token_ids[-state.unfixed_token_num:] if state.unfixed_token_num > 0 else []
-            if rollback:
-                prefix = self._tokenizer.decode(rollback, skip_special_tokens=False).replace("\ufffd", "")
+            prefix = _build_stream_prefix(
+                self._tokenizer, state.raw_decoded, state.unfixed_token_num
+            )
 
+        # 预热期给足 token，让模型先吐出 `language X<asr_text>` 前缀；稳定期只做
+        # 增量生成以降低出字延迟（前缀没出来时正文永远解析不到）
+        max_tokens = (
+            state.max_new_tokens_initial
+            if state.chunk_id < state.warmup_chunks
+            else state.max_new_tokens
+        )
         output = self._llm.generate(
             [
                 {
@@ -616,7 +658,7 @@ class Qwen3VLLMBackend:
             ],
             sampling_params=self._sampling_params_cls(
                 temperature=0.01,
-                max_tokens=state.max_new_tokens,
+                max_tokens=max_tokens,
             ),
             use_tqdm=False,
         )[0]
