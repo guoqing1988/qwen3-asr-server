@@ -2,7 +2,7 @@
 
 > 分支：`feature/confucius4-r2t2`
 > 日期：2026-09-25
-> 状态：待用户批准
+> 状态：**已完成**（2026-09-25 交付，已合并 main；执行结果见 §十）
 
 ## 一、背景与目标
 
@@ -179,3 +179,32 @@ Confucius4（1.7B）初步建议：主引擎 `gpu_memory_utilization = 0.25~0.30
 6. 部署环境 + 下载模型 + 启动
 7. 端到端实测（识别质量 + 词级时间戳 + 显存），微调参数
 8. 更新文档，提交（`feat: 迁移 ASR 至 Confucius4-R2T2 并优化显存占用`）
+
+## 十、执行结果（2026-09-25）
+
+### 实际落地
+
+- **模型**：默认 ASR 换为 `qwen3-asr-confucius4-r2t2`（`models.json` `default: true`）；`qwen3-asr-1.7b` 与 `qwen3-asr-0.6b` 条目保留但不参与默认加载。
+- **模型位置**：统一 `/data1/models`（`QWEN3_ASR_MODEL_PATH` / `QWEN3_FORCED_ALIGNER_PATH` / `MODELSCOPE_CACHE=/data1/models/modelscope/hub` / `HF_HOME=/data1/models/huggingface`）。
+- **配置分层**：`models.json` 只放模型定义并支持 `${VAR:-default}` 占位符；运维参数（显存/并发/卸载/流式）全部走 `.env`，无硬编码。
+- **显存实测**（RTX 4090 24GB，`CUDA_VISIBLE_DEVICES=7`）：基线 0.86GB → 仅 ASR 引擎 **6.0GB** → 完整服务 **8.87GB** → 词级时间戳峰值 12.2GB。达成「空闲 ≤7GB」目标。
+- **关键参数**：`QWEN_GPU_MEMORY_UTILIZATION=0.35`、`QWEN_KV_CACHE_MEMORY_BYTES=1610612736`、`QWEN_MAX_NUM_SEQS=5`、`QWEN_MAX_NUM_BATCHED_TOKENS=2048`、`QWEN_MAX_MODEL_LEN=4096`、`QWEN_ENFORCE_EAGER=true`、`QWEN_WARMUP_FORCED_ALIGNER=false`、`QWEN_IDLE_UNLOAD_TIMEOUT=900`。
+- **部署**：systemd unit 软链接安装（仓库 unit 为唯一来源），GPU / 端口全由 `.env` 驱动。
+- **清理**：删除 1.8GB 冗余对齐器副本（HF cache 重复下载）、整理 ModelScope 多一层 `models` 目录、清理下载残留。
+
+### 与计划的偏差
+
+- **§八 Q2（Paraformer 实时栈）**：保留现状（未加开关），完整服务因此多约 2GB。
+- **§八 Q3（.env）**：按方案 (a)，基于 `.env.example` 生成。
+- **§五 文档示例**：`app/models/asr.py` 等 Swagger example 未逐一改（模型 id 由 `models.json` 驱动，旧示例仍可用）。
+- **计划外新增**：修复流式（`/ws/v1/asr/qwen`）三个 bug（prefix 丢历史、`max_new_tokens` 过小、解析残留），详见 troubleshooting「流式输出乱码 / 退化成标点」。
+
+### 测试与提交
+
+- 新增 `tests/test_qwen3_stream_parse.py`（9 例）；相关用例 25 passed。
+- 提交：`78d67c5` feat（迁移+显存）、`6d214fa` docs、`8655f82` fix（流式），已合并 main 并推送。
+
+### 遗留问题
+
+- **流式长音频处理滞后累积**：52.5s 音频实测滞后约 6.2s（≈12%），根因是每轮对累积音频做全量重算（无 vLLM KV 增量续写），需较大改造才能根治。
+- `QWEN_STREAM_MAX_NEW_TOKENS=512` 上限对 2 分钟以上音频可能截断（52.5s 音频约 172 词，尚未触及）。
