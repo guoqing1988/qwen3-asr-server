@@ -280,6 +280,8 @@ class RuntimeRouter:
             self._active_requests[runtime_key] = max(
                 0, self._active_requests.get(runtime_key, 0) - 1
             )
+            # 空闲计时从「请求结束」起算（长任务结束前不应被视为空闲）
+            self._last_use[runtime_key] = time.monotonic()
             semaphore.release()
 
         return release
@@ -361,60 +363,87 @@ class RuntimeRouter:
                 logger.warning("Idle unload check failed: %s", exc)
 
     async def _unload_idle_engines(self, timeout: float, vram_pressure: bool = False) -> None:
-        """卸载空闲的 vLLM 引擎。
+        """空闲时归还 vLLM 显存。
 
-        普通模式：超过 idle 阈值且无活跃请求/等待者时卸载。
-        显存压力模式（vram_pressure=True）：可用显存紧张时，冷却期过后即卸载，
-        将显存让位给其他 GPU 服务（如 ComfyUI）。
+        - 支持 sleep mode 的引擎：调用 sleep（进程常驻、唤醒 <1s，不销毁子进程）；
+        - 不支持的引擎：回退到原来的卸载（销毁 EngineCore 子进程）；
+        - aligner 独立计时与释放：忙时绝不释放，也不被主引擎连坐。
+
+        普通模式用 idle 超时；压力模式用冷却期。
         """
         now = time.monotonic()
+        threshold = (
+            settings.QWEN_VRAM_PRESSURE_COOLDOWN_S if vram_pressure else timeout
+        )
         for runtime_key, engine in list(self._shared_engines.items()):
             if runtime_key[0] != RuntimeFamily.QWEN_VLLM:
                 continue
             if not self._engine_loaded(engine):
                 continue
+
+            # aligner：独立生命周期，忙 → 不释放
+            if getattr(engine, "aligner_is_loaded", lambda: False)():
+                if not engine.aligner_is_busy() and (
+                    engine.aligner_idle_seconds() >= threshold
+                ):
+                    try:
+                        await asyncio.to_thread(engine.sleep_aligner)
+                    except Exception as exc:  # noqa: BLE001 - 单次失败不阻断监控
+                        logger.warning("Failed to sleep forced aligner: %s", exc)
+
+            # 主引擎
             if self._active_requests.get(runtime_key, 0) > 0:
                 continue
             semaphore = self._shared_limits.get(runtime_key)
-            # 有请求在等待信号量时不可卸载
+            # 有请求在等待信号量时不可释放
             if semaphore is not None and semaphore.locked():
                 continue
             last_use = self._last_use.get(runtime_key)
-            if last_use is None:
-                continue
-            idle_for = now - last_use
-            if vram_pressure:
-                # 压力模式：冷却期过后即卸载，不等待完整 idle 超时
-                cooldown_s = settings.QWEN_VRAM_PRESSURE_COOLDOWN_S
-                if idle_for < cooldown_s:
-                    continue
-            elif idle_for < timeout:
+            if last_use is None or now - last_use < threshold:
                 continue
 
-            model_id = runtime_key[1]
-            lock = self._load_locks.setdefault(runtime_key, asyncio.Lock())
-            async with lock:
-                # 等待锁期间可能有新请求进来，二次检查
-                if not self._engine_loaded(engine):
-                    continue
-                if self._active_requests.get(runtime_key, 0) > 0:
-                    continue
-                if semaphore is not None and semaphore.locked():
+            idle_for = now - last_use
+            try:
+                if getattr(engine, "supports_sleep", lambda: False)():
+                    if getattr(engine, "is_sleeping", lambda: False)():
+                        continue  # 已休眠，不重复释放/打日志
+                    await asyncio.to_thread(engine.sleep)
+                    logger.info(
+                        "Engine %s idle for %.0fs, slept to release GPU memory%s",
+                        runtime_key[1],
+                        idle_for,
+                        " (vram pressure)" if vram_pressure else "",
+                    )
                     continue
                 logger.info(
                     "Engine %s idle for %.0fs, unloading to release GPU memory%s",
-                    model_id,
+                    runtime_key[1],
                     idle_for,
                     " (vram pressure)" if vram_pressure else "",
                 )
-                try:
-                    await asyncio.to_thread(engine.unload)
-                except Exception as exc:  # noqa: BLE001 - 卸载失败不阻断监控
-                    logger.error("Failed to unload engine %s: %s", model_id, exc)
-                    continue
-                self._shared_engines.pop(runtime_key, None)
-                self._loaded_model_ids.discard(model_id)
-                logger.info("Engine %s unloaded, GPU memory released", model_id)
+                await asyncio.to_thread(engine.unload)
+            except Exception as exc:  # noqa: BLE001 - 释放失败不阻断监控
+                logger.error("Failed to release engine %s: %s", runtime_key[1], exc)
+                continue
+            self._shared_engines.pop(runtime_key, None)
+            self._loaded_model_ids.discard(runtime_key[1])
+            logger.info("Engine %s unloaded, GPU memory released", runtime_key[1])
+
+    async def release_vllm_gpu(self) -> None:
+        """归还 vLLM 显存，供声纹等需要大块显存的步骤使用（下次请求自动唤醒）。"""
+        for runtime_key, engine in list(self._shared_engines.items()):
+            if runtime_key[0] != RuntimeFamily.QWEN_VLLM:
+                continue
+            if self._active_requests.get(runtime_key, 0) > 0:
+                continue
+            sleep_all = getattr(engine, "sleep_all", None)
+            if sleep_all is None:
+                continue
+            try:
+                await asyncio.to_thread(sleep_all)
+                logger.info("Released vLLM GPU memory for external GPU work")
+            except Exception as exc:  # noqa: BLE001 - 让路失败不应阻断主流程
+                logger.warning("Failed to release vLLM GPU memory: %s", exc)
 
 
 _runtime_router: Optional[RuntimeRouter] = None

@@ -125,6 +125,15 @@ class OfflineTranscriptionService:
         if not settings.VOICEPRINT_ENABLED:
             return result
 
+        # 声纹（CAM++）需额外显存，先让 vLLM 引擎归还显存避免 CUDA OOM；
+        # vLLM 进程仍常驻，下次转写请求自动唤醒（<1s）
+        try:
+            await get_runtime_router().release_vllm_gpu()
+        except Exception as exc:  # noqa: BLE001 - 让路失败不影响声纹降级逻辑
+            logger.warning(
+                "Failed to release vLLM GPU memory before voiceprint: %s", exc
+            )
+
         try:
             return get_speaker_identification_service().enrich_asr_result(
                 audio_path=prepared_audio.normalized_path,

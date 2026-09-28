@@ -5,6 +5,7 @@ GPU 模型推理不可控且重（需加载 forced aligner 模型），align_tra
 CLAUDE.md 测试规范：对外部不可控服务允许 Mock）。
 """
 
+import threading
 import unittest
 from unittest import mock
 
@@ -97,6 +98,13 @@ class AlignTranscriptTest(unittest.TestCase):
         backend = object.__new__(Qwen3VLLMBackend)
         backend._timestamp_token_id = _TIMESTAMP_TOKEN_ID
         backend._timestamp_segment_time = _SEGMENT_TIME_MS
+        # aligner 休眠/唤醒状态（真实构造时由 __init__ 初始化）
+        backend._enable_sleep_mode = False
+        backend._aligner_state_lock = threading.RLock()
+        backend._aligner_active = 0
+        backend._aligner_last_use = 0.0
+        backend._aligner_sleeping = False
+        backend._forced_aligner = None
         backend._get_forced_aligner = lambda: _FakeAligner(prompt_token_ids, bins)
         return backend
 

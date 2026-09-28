@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import importlib.util
 import logging
 import os
 import re
+import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -290,6 +293,7 @@ class Qwen3VLLMBackend:
         enforce_eager: bool = False,
         kv_cache_memory_bytes: int | None = None,
         forced_aligner_max_model_len: int | None = None,
+        enable_sleep_mode: bool = False,
     ) -> None:
         try:
             vllm_module = importlib.import_module("vllm")
@@ -329,6 +333,12 @@ class Qwen3VLLMBackend:
             llm_kwargs["enforce_eager"] = True
         if kv_cache_memory_bytes is not None:
             llm_kwargs["kv_cache_memory_bytes"] = kv_cache_memory_bytes
+        # sleep mode：进程常驻，空闲时把权重 offload 到 CPU、丢弃 KV cache 以归还显存
+        if enable_sleep_mode:
+            llm_kwargs["enable_sleep_mode"] = True
+            # sleep 丢弃 KV cache 后 multimodal processor cache 内部状态失效，
+            # 唤醒后重复音频会命中失效项并抛 AssertionError（实测），故禁用该缓存
+            llm_kwargs["mm_processor_cache_gb"] = 0
 
         self._llm = self._llm_cls(**llm_kwargs)
         self._sampling_params = self._sampling_params_cls(
@@ -346,6 +356,17 @@ class Qwen3VLLMBackend:
         self._forced_aligner: Any | None = None
         self._timestamp_token_id: int | None = None
         self._timestamp_segment_time: float | None = None
+
+        # 显存让位状态（sleep/wake）
+        self._enable_sleep_mode = enable_sleep_mode
+        self._sleep_lock = threading.RLock()
+        self._main_active = 0
+        self._main_sleeping = False
+        # aligner 独立生命周期：自己的活跃计数与最后使用时间，不被主引擎连坐
+        self._aligner_state_lock = threading.RLock()
+        self._aligner_active = 0
+        self._aligner_last_use = time.monotonic()
+        self._aligner_sleeping = False
 
     def _get_forced_aligner_gpu_memory_utilization(self) -> float:
         configured = _resolve_forced_aligner_gpu_memory_utilization(
@@ -383,6 +404,10 @@ class Qwen3VLLMBackend:
                 aligner_kwargs["max_model_len"] = self._forced_aligner_max_model_len
             if self._max_num_batched_tokens is not None:
                 aligner_kwargs["max_num_batched_tokens"] = self._max_num_batched_tokens
+            if self._enable_sleep_mode:
+                aligner_kwargs["enable_sleep_mode"] = True
+                # 同主引擎：sleep 后 multimodal 缓存会失效，禁用
+                aligner_kwargs["mm_processor_cache_gb"] = 0
             self._forced_aligner = self._llm_cls(**aligner_kwargs)
             llm_engine = getattr(self._forced_aligner, "llm_engine", None)
             if llm_engine is None:
@@ -390,6 +415,8 @@ class Qwen3VLLMBackend:
             config = llm_engine.vllm_config.model_config.hf_config
             self._timestamp_token_id = int(config.timestamp_token_id)
             self._timestamp_segment_time = float(config.timestamp_segment_time)
+            self._aligner_last_use = time.monotonic()
+            self._aligner_sleeping = False
 
         return self._forced_aligner
 
@@ -418,10 +445,135 @@ class Qwen3VLLMBackend:
 
         self._forced_aligner = None
         self._llm = None
+        self._main_sleeping = False
+        self._aligner_sleeping = False
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         logger.info("Qwen3VLLMBackend shutdown complete, GPU memory released")
+
+    # ------------------------------------------------------------------
+    # sleep / wake：进程常驻，空闲时只归还显存（不销毁 vLLM 子进程）
+    # ------------------------------------------------------------------
+
+    def supports_sleep(self) -> bool:
+        return self._enable_sleep_mode and self._llm is not None
+
+    @contextlib.contextmanager
+    def _main_in_use(self):
+        """标记主引擎使用中（必要时唤醒），与 sleep 互斥。"""
+        with self._sleep_lock:
+            self._main_active += 1
+            if self._main_sleeping and self._llm is not None:
+                started = time.monotonic()
+                self._llm.wake_up()
+                self._main_sleeping = False
+                logger.info("Main engine woke up in %.2fs", time.monotonic() - started)
+        try:
+            yield
+        finally:
+            with self._sleep_lock:
+                self._main_active = max(0, self._main_active - 1)
+
+    def is_main_sleeping(self) -> bool:
+        return self._main_sleeping
+
+    def sleep_main(self) -> None:
+        """归还主引擎显存（权重 offload 到 CPU、丢弃 KV cache）。"""
+        if not self._enable_sleep_mode or self._llm is None:
+            return
+        with self._sleep_lock:
+            if self._main_sleeping or self._main_active > 0:
+                return
+            started = time.monotonic()
+            self._llm.sleep(level=1)
+            self._main_sleeping = True
+            logger.info(
+                "Main engine slept in %.1fs, GPU memory released",
+                time.monotonic() - started,
+            )
+
+    def wake_main(self) -> None:
+        if self._llm is None or not self._main_sleeping:
+            return
+        with self._sleep_lock:
+            if not self._main_sleeping:
+                return
+            started = time.monotonic()
+            self._llm.wake_up()
+            self._main_sleeping = False
+            logger.info("Main engine woke up in %.2fs", time.monotonic() - started)
+
+    # ---- forced aligner（独立生命周期：可单独 sleep，不被主引擎连坐）----
+
+    def is_aligner_loaded(self) -> bool:
+        return self._forced_aligner is not None
+
+    def is_aligner_sleeping(self) -> bool:
+        return self._aligner_sleeping
+
+    def is_aligner_busy(self) -> bool:
+        return self._aligner_active > 0
+
+    def aligner_idle_seconds(self) -> float:
+        if self._forced_aligner is None:
+            return 0.0
+        return time.monotonic() - self._aligner_last_use
+
+    @contextlib.contextmanager
+    def _aligner_in_use(self):
+        """标记 aligner 使用中（必要时唤醒），与 sleep 互斥。"""
+        with self._aligner_state_lock:
+            self._aligner_active += 1
+            self._aligner_last_use = time.monotonic()
+            if self._aligner_sleeping and self._forced_aligner is not None:
+                started = time.monotonic()
+                self._forced_aligner.wake_up()
+                self._aligner_sleeping = False
+                logger.info("Forced aligner woke up in %.2fs", time.monotonic() - started)
+        try:
+            yield
+        finally:
+            with self._aligner_state_lock:
+                self._aligner_active = max(0, self._aligner_active - 1)
+                self._aligner_last_use = time.monotonic()
+
+    def sleep_aligner(self) -> None:
+        """单独归还 aligner 显存（主引擎不受影响）。"""
+        if not self._enable_sleep_mode or self._forced_aligner is None:
+            return
+        with self._aligner_state_lock:
+            if self._aligner_sleeping or self._aligner_active > 0:
+                return
+            started = time.monotonic()
+            self._forced_aligner.sleep(level=1)
+            self._aligner_sleeping = True
+            logger.info(
+                "Forced aligner slept in %.1fs, GPU memory released",
+                time.monotonic() - started,
+            )
+
+    def wake_aligner(self) -> None:
+        if self._forced_aligner is None or not self._aligner_sleeping:
+            return
+        with self._aligner_state_lock:
+            if not self._aligner_sleeping:
+                return
+            started = time.monotonic()
+            self._forced_aligner.wake_up()
+            self._aligner_sleeping = False
+            logger.info("Forced aligner woke up in %.2fs", time.monotonic() - started)
+
+    def sleep_all(self) -> None:
+        """归还两个引擎的显存（供声纹等需要大块显存的步骤让路）。"""
+        try:
+            self.sleep_aligner()
+        except Exception as exc:  # noqa: BLE001 - 让路失败不应影响主流程
+            logger.warning("Failed to sleep forced aligner: %s", exc)
+        try:
+            self.sleep_main()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to sleep main engine: %s", exc)
 
     def _run_generate(
         self,
@@ -436,11 +588,12 @@ class Qwen3VLLMBackend:
                 }
             )
 
-        outputs = self._llm.generate(
-            prompts,
-            sampling_params=self._sampling_params,
-            use_tqdm=False,
-        )
+        with self._main_in_use():
+            outputs = self._llm.generate(
+                prompts,
+                sampling_params=self._sampling_params,
+                use_tqdm=False,
+            )
 
         transcripts: list[_GeneratedTranscript] = []
         for output, (_audio, _context, language) in zip(outputs, audio_items):
@@ -562,10 +715,11 @@ class Qwen3VLLMBackend:
         aligner = self._get_forced_aligner()
         prompt = _build_alignment_prompt(tokens)
         audio_array = audio if audio is not None else _load_audio(audio_path)
-        outputs = aligner.encode(
-            [{"prompt": prompt, "multi_modal_data": {"audio": audio_array}}],
-            pooling_task="token_classify",
-        )
+        with self._aligner_in_use():
+            outputs = aligner.encode(
+                [{"prompt": prompt, "multi_modal_data": {"audio": audio_array}}],
+                pooling_task="token_classify",
+            )
         output = outputs[0]
         logits = output.outputs.data
         predictions = logits.argmax(dim=-1) if hasattr(logits, "argmax") else np.argmax(logits, axis=-1)
@@ -654,19 +808,20 @@ class Qwen3VLLMBackend:
             if state.chunk_id < state.warmup_chunks
             else state.max_new_tokens
         )
-        output = self._llm.generate(
-            [
-                {
-                    "prompt": state.prompt_raw + prefix,
-                    "multi_modal_data": {"audio": [state.audio_accum]},
-                }
-            ],
-            sampling_params=self._sampling_params_cls(
-                temperature=0.01,
-                max_tokens=max_tokens,
-            ),
-            use_tqdm=False,
-        )[0]
+        with self._main_in_use():
+            output = self._llm.generate(
+                [
+                    {
+                        "prompt": state.prompt_raw + prefix,
+                        "multi_modal_data": {"audio": [state.audio_accum]},
+                    }
+                ],
+                sampling_params=self._sampling_params_cls(
+                    temperature=0.01,
+                    max_tokens=max_tokens,
+                ),
+                use_tqdm=False,
+            )[0]
         generated = str(output.outputs[0].text if output.outputs else "")
         parsed_language, parsed_text = _parse_asr_output(prefix + generated, state.language or None)
         state.raw_decoded = prefix + generated

@@ -421,6 +421,7 @@ class Qwen3ASREngine(BaseASREngine):
             enforce_eager=settings.QWEN_ENFORCE_EAGER,
             kv_cache_memory_bytes=settings.QWEN_KV_CACHE_MEMORY_BYTES,
             forced_aligner_max_model_len=settings.QWEN_FORCE_ALIGNER_MAX_MODEL_LEN,
+            enable_sleep_mode=settings.QWEN_ENABLE_SLEEP_MODE,
         )
 
     @_handle_asr_error("转写")
@@ -705,6 +706,52 @@ class Qwen3ASREngine(BaseASREngine):
             self.model.shutdown()
         self.model = None
         logger.info("Qwen3-ASR model unloaded (backend=%s)", self._backend)
+
+    # ------------------------------------------------------------------
+    # sleep / wake 透传（vLLM 后端）：进程常驻，仅归还显存
+    # ------------------------------------------------------------------
+
+    def supports_sleep(self) -> bool:
+        if self._backend != "vllm" or self.model is None:
+            return False
+        return bool(self.model.supports_sleep())
+
+    def sleep(self) -> None:
+        if self._backend == "vllm" and self.model is not None:
+            self.model.sleep_main()
+
+    def wake_up(self) -> None:
+        if self._backend == "vllm" and self.model is not None:
+            self.model.wake_main()
+
+    def is_sleeping(self) -> bool:
+        if self._backend == "vllm" and self.model is not None:
+            return bool(self.model.is_main_sleeping())
+        return False
+
+    def sleep_aligner(self) -> None:
+        if self._backend == "vllm" and self.model is not None:
+            self.model.sleep_aligner()
+
+    def aligner_is_loaded(self) -> bool:
+        if self._backend == "vllm" and self.model is not None:
+            return bool(self.model.is_aligner_loaded())
+        return False
+
+    def aligner_is_busy(self) -> bool:
+        if self._backend == "vllm" and self.model is not None:
+            return bool(self.model.is_aligner_busy())
+        return False
+
+    def aligner_idle_seconds(self) -> float:
+        if self._backend == "vllm" and self.model is not None:
+            return float(self.model.aligner_idle_seconds())
+        return 0.0
+
+    def sleep_all(self) -> None:
+        """归还全部 vLLM 显存（供声纹等需要大块显存的步骤让路）。"""
+        if self._backend == "vllm" and self.model is not None:
+            self.model.sleep_all()
 
     @property
     def device(self) -> str:

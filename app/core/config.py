@@ -84,8 +84,11 @@ class Settings:
     QWEN_RUST_CPU_WORKERS: int = 4
     FUNASR_WORKERS: int = 1
 
-    # 空闲自动卸载配置（秒；超过该时长无请求则卸载 vLLM 引擎释放显存，0=禁用）
+    # 空闲自动归还显存配置（秒；超过该时长无请求则 sleep/卸载 vLLM 引擎释放显存，0=禁用）
     QWEN_IDLE_UNLOAD_TIMEOUT: int = 300
+    # sleep mode：启用后空闲时把权重 offload 到 CPU（进程常驻，唤醒 <1s）；
+    # 关闭则回退为销毁子进程（重载需十余秒）
+    QWEN_ENABLE_SLEEP_MODE: bool = True
 
     # 显存压力卸载配置：可用显存低于阈值且引擎空闲时让位其他 GPU 服务
     QWEN_LOW_VRAM_THRESHOLD_GB: float = 15.0
@@ -200,6 +203,10 @@ class Settings:
 
         self.QWEN_IDLE_UNLOAD_TIMEOUT = int(
             os.getenv("QWEN_IDLE_UNLOAD_TIMEOUT", str(self.QWEN_IDLE_UNLOAD_TIMEOUT))
+        )
+        self.QWEN_ENABLE_SLEEP_MODE = (
+            os.getenv("QWEN_ENABLE_SLEEP_MODE", str(self.QWEN_ENABLE_SLEEP_MODE)).lower()
+            in {"1", "true", "yes", "on"}
         )
 
         self.QWEN_LOW_VRAM_THRESHOLD_GB = float(
