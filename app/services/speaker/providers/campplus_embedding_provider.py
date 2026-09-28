@@ -49,7 +49,9 @@ class CampplusEmbeddingProvider:
             from modelscope.utils.constant import Tasks
 
             model_path = resolve_model_path(self.model_name)
-            device = detect_device(settings.DEVICE)
+            # 设备由 VOICEPRINT_DEVICE 决定（默认 auto）：分段提取已保证单次输入 ≤30s，
+            # GPU 峰值约 840MiB，比 CPU 快 5-8 倍（见 settings.VOICEPRINT_DEVICE）
+            device = detect_device(settings.VOICEPRINT_DEVICE)
             logger.info(
                 "Loading CAM++ speaker embedding provider: model=%s, device=%s",
                 model_path,

@@ -139,6 +139,11 @@ class Settings:
     VOICEPRINT_ENABLED: bool = True
     VOICEPRINT_DB_PATH: str = str(BASE_DIR / "data" / "voiceprints.sqlite3")
     VOICEPRINT_MATCH_THRESHOLD: float = 0.70
+    # 声纹推理设备：默认 auto（有 CUDA 用 GPU，否则 CPU）。
+    # 分段提取保证单次输入 ≤ VOICEPRINT_MAX_CHUNK_SEC(30s)，GPU 峰值显存实测约 840MiB；
+    # 而把数小时拼接音频整体送入会爆 17GB+（CUDA OOM 且 reserved 不归还）。
+    # CPU 慢 5-8 倍（30s 音频 291ms vs GPU 37ms），无 GPU 环境自动降级。
+    VOICEPRINT_DEVICE: str = "auto"
 
     def __init__(self):
         """从环境变量读取配置"""
@@ -299,6 +304,9 @@ class Settings:
                 str(self.VOICEPRINT_MATCH_THRESHOLD),
             )
         )
+        self.VOICEPRINT_DEVICE = (
+            os.getenv("VOICEPRINT_DEVICE") or self.VOICEPRINT_DEVICE
+        ).strip()
 
 
     @staticmethod
