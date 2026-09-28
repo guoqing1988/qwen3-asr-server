@@ -56,15 +56,19 @@ Qwen3-ASR 服务（GPU 版）：Confucius4-R2T2（vLLM，默认且唯一 ASR 模
 - 本地 `.venv` 不含 pytest：`uv pip install pytest`
 - 跑测试：`.venv/bin/python -m pytest tests/ -v`
 - Docker 环境：`docker cp tests/<file> qwen3-asr:/tmp/` → `docker exec qwen3-asr /opt/venv/bin/python -m pytest /tmp/test_*.py -v`
-- 相关测试：`test_idle_unload.py`（空闲/压力卸载）、`test_lazy_load_retry.py`（懒加载重试）、`test_startup_graceful_degrade.py`（降级启动）
+- 相关测试：`test_idle_unload.py`（空闲/压力卸载）、`test_lazy_load_retry.py`（懒加载重试）、`test_startup_graceful_degrade.py`（降级启动）、`test_audio_decode_fallback.py`（音频解码三级兜底）
 
 ## 引擎容错与显存策略（已实现）
 
 - **懒加载自动重试**：引擎创建失败重试 3 次（间隔 5s/10s）
 - **降级启动**：qwen3 预加载失败不阻断启动，funasr 兜底
 - **forced aligner 懒加载**：aligner（另一个 vLLM 实例，约 3GB）不再在启动时预热，只在 `word_timestamps=true` 的请求到来时才加载（`QWEN_WARMUP_FORCED_ALIGNER=false`）——这是启动显存从 16GB 降到 6GB 的关键
-- **空闲卸载**：`QWEN_IDLE_UNLOAD_TIMEOUT`（秒），0 禁用；当前 `.env` 设 **900（15 分钟无请求自动卸载 vLLM 引擎释放显存）**
-- **显存压力卸载**：可用显存低于 `QWEN_LOW_VRAM_THRESHOLD_GB`（默认 6GB）且引擎空闲超过 `QWEN_VRAM_PRESSURE_COOLDOWN_S`（默认 60s）自动让位
+- **空闲休眠（sleep mode，默认开启）**：`QWEN_IDLE_UNLOAD_TIMEOUT`（秒，当前 `.env` 设 **15**）无请求即 `sleep`——权重 offload 到 CPU、丢弃 KV cache，**vLLM 进程常驻**，下次请求 `wake_up` 仅 **0.1~0.4s**（对比销毁重建 11~21s）。`QWEN_ENABLE_SLEEP_MODE=false` 可回退为销毁子进程
+- **aligner 独立生命周期**：aligner 有自己的活跃计数与空闲计时，忙时绝不释放、也不被主引擎连坐（旧实现只在主引擎卸载时跟着 `shutdown`，对齐阶段主引擎一旦空闲就会把正在干活的 aligner 一起关掉）
+- **声纹（CAM++）按 ASR 分段提取**：逐段提取 embedding 后按时长加权融合（单段超 30s 再细分、<1s 丢弃、全短则拼接兑底）——把同一说话人数小时拼接音频整体送入会让 TDNN 中间激活爆显存（实测 CUDA OOM，且失败后 ~17GB reserved 不归还，声纹一直被降级为「仅保留 diarization 标签」）。分段限长后 GPU 安全：`.env` 默认 `VOICEPRINT_DEVICE=auto`（有 CUDA 用 GPU：30s 音频峰值约 840MiB、峰值 712MiB、快 CPU 5~8 倍），提取后 `empty_cache` 归还缓存
+- **声纹让路**：离线转写在声纹（CAM++）推理前主动让 vLLM 引擎 `sleep` 归还显存，避免 CUDA OOM（实测曾因两引擎常驻导致声纹识别降级为仅保留 diarization 标签）
+- **显存压力休眠**：可用显存低于 `QWEN_LOW_VRAM_THRESHOLD_GB` 且空闲超过 `QWEN_VRAM_PRESSURE_COOLDOWN_S` 即休眠让位；不支持 sleep 的引擎回退为卸载
+- **sleep 与多模态缓存的坑**：启用 sleep 时必须同时 `mm_processor_cache_gb=0`（代码内固定），否则唤醒后重复音频会命中失效的 multimodal processor cache 并抛 `AssertionError`（已实测；该缓存是 CPU 内存，禁用不影响显存）
 - **显存控制参数**（全部走 `.env`，不写死在 `models.json`）：
   - `QWEN_GPU_MEMORY_UTILIZATION`（当前 0.35）
   - `QWEN_KV_CACHE_MEMORY_BYTES`（当前 1.5GiB；精确控制 KV cache，避免按 utilization 吃满显存）
@@ -74,7 +78,7 @@ Qwen3-ASR 服务（GPU 版）：Confucius4-R2T2（vLLM，默认且唯一 ASR 模
   - `QWEN_STREAM_MAX_NEW_TOKENS`（流式单 chunk 生成上限，当前 2048；本项目每轮全量重算而非 KV 增量续写，该值须覆盖整段累积文本，且它是上限而非耗时，调大不影响出字延迟）
   - `QWEN_STREAM_MAX_NEW_TOKENS_INITIAL`（当前 32）/ `QWEN_STREAM_WARMUP_CHUNKS`（当前 8）：预热期生成上限与预热 chunk 数
   - **滑动窗口**：`QWEN_STREAM_SEGMENT_MAX_SEC`（当前 12s，单段上限，超时强制落定）、`QWEN_STREAM_SILENCE_SEC`（当前 2s，静音优先落定）、`QWEN_STREAM_OVERLAP_SEC`（当前 1s，段间重叠音频 + 边界去重）——保证每轮解码窗口恒定，适合小时/天级长时实时任务（实测 52.5s 音频滞后从 6.2s 降至 0.1s）
-- **实测显存**（RTX 4090 24GB，`CUDA_VISIBLE_DEVICES=7`）：仅 ASR 引擎约 **6.0GB**；完整服务（含 VAD/CAM++/Paraformer/标点）约 **8.7GB**；显式请求词级时间戳时峰值约 12GB
+- **实测显存**（RTX 4090 24GB）：**休眠态**仅主进程约 1.9GB + 引擎残留约 0.95GB ≈ **2.8GB**；**唤醒态** ASR 引擎约 **8.8GB**（权重 3.87 + KV 1.5 + 长音频 encoder buffer）、aligner 约 **6.0GB**（权重 1.73 + KV 1.79）：显式请求词级时间戳时两者合计峰值约 17GB（靠 15s 空闲休眠回落）
 - `gpu_memory_utilization` 有下限：主引擎约 0.16-0.20，对齐器约 0.15（调低会 KV cache 不足启动失败）；已用 `QWEN_KV_CACHE_MEMORY_BYTES` 精确控制 KV cache
 
 ## 已知问题与排障（详见 docs/troubleshooting.md）
@@ -85,6 +89,7 @@ Qwen3-ASR 服务（GPU 版）：Confucius4-R2T2（vLLM，默认且唯一 ASR 模
 - 容器重建丢可写层：`docker exec` 装的包（pytest 等）需重装；`.env` 备份放 `.env.bak.*`
 - **CAM++ 离线加载**：`iic/speech_campplus_speaker-diarization_common/configuration.json` 里的子模型路径（`speaker_model` / `change_locator` / `vad_model`）可能残留旧路径（旧 Docker 路径，或缓存目录多一层 `models`）。`fix_camplusplus_config()` 启动时按路径末尾的 `<org>/<name>`（`damo` / `iic`）提取 model id，再用当前 `MODELSCOPE_CACHE` 重建，自动修正；若仍未修复，检查子模型目录权限（`sudo chown`）
 - **ModelScope 缓存路径**：库真实结构是 `$MODELSCOPE_CACHE/models/<id>`，`settings.MODELSCOPE_PATH` 已按此拼接（`MODELSCOPE_CACHE` 指到 `.../modelscope/hub` 即可）；模型统一放 `/data1/models`，不再放项目内 `models/`
+- **音频解码兜底**：`convert_audio_to_wav` 为三级链路（librosa/soundfile → PyAV 逐帧容错 → ffmpeg CLI），损坏 mp3 由 PyAV/ffmpeg 兜底；`av` 已提升为显式依赖，本机 ffmpeg 已通过 `apt` 安装
 
 ## 约定
 

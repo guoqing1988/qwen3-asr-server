@@ -53,9 +53,11 @@
 - vLLM 0.19 双进程架构：主进程持有音频编码器（mm encoder）按 max_num_batched_tokens 预算预分配的活跃 buffer，非空闲块，`empty_cache` 释放不了
 - 引擎空闲卸载后主进程回落（2GB），证明非内存泄漏
 - `gpu_memory_utilization` 有下限：调太低报 `No available memory for the cache blocks` / `To serve at least one request ... (0.88 GiB KV cache is needed ...)`，启动失败。主引擎 48GB 卡下限约 0.16-0.20，对齐器因 encoder cache 开销大下限约 0.15
-- 解决（两级）：
+- 显存实测（2026-09-28）：**休眠态约 2.8GB**（主进程 1.9GB + 引擎残留 0.95GB）；唤醒态 ASR 引擎 8.8GB、aligner 6.0GB
+- 解决（三级）：
   1. **启动即降显存**（2026-09-25 完成）：forced aligner 改懒加载 + KV cache 精确控制（`QWEN_KV_CACHE_MEMORY_BYTES`）+ `enforce_eager` + 降 `max_num_batched_tokens`，启动显存 16GB → 约 6GB
-  2. **运行时让位**：显存压力自适应卸载（可用显存 < `QWEN_LOW_VRAM_THRESHOLD_GB`（默认 6GB）且引擎空闲超 `QWEN_VRAM_PRESSURE_COOLDOWN_S`（默认 60s）时自动卸载）+ 空闲卸载兜底（`QWEN_IDLE_UNLOAD_TIMEOUT`，生产设 900s）
+  2. **运行时让位**：显存压力休眠（可用显存 < `QWEN_LOW_VRAM_THRESHOLD_GB`（默认 6GB）且引擎空闲超 `QWEN_VRAM_PRESSURE_COOLDOWN_S`（默认 60s）时自动让位）+ 空闲休眠（`QWEN_IDLE_UNLOAD_TIMEOUT`，生产设 15s）
+  3. **sleep mode**（2026-09-28）：空闲只归还显存、进程常驻，唤醒 <1s（详见本文末新章节）
 
 ## 镜像体积排查
 
@@ -283,3 +285,125 @@ sudo systemctl daemon-reload
 **回归测试**：`.venv/bin/python -m pytest tests/test_qwen3_stream_window.py -v`（`_strip_overlap` 中英文/大小写/边界，`_need_truncate` 阈值，`_extract_segment_tail` 尾部切片）。
 
 **残余限制**：单段内仍是全量重算，所以窗口大小直接决定单轮成本；若要进一步降延迟，需改用 vLLM 异步引擎做 KV 增量续写（大改造）。
+
+## 2026-09-28：音频格式转换失败导致 500（mp3 损坏 + 本地缺 ffmpeg）
+
+### 现象
+
+`POST /v1/audio/transcriptions` 返回 500，日志：
+
+```
+Note: Illegal Audio-MPEG-Header 0x2c203733 at offset 5179245.
+Note: Trying to resync...
+Note: Skipped 1024 bytes in input.
+error: Giving up resync after 1024 bytes - your stream is not nice...
+[OpenAI API] 转写失败: 音频标准化失败: 音频格式转换失败:
+```
+
+**错误信息尾部为空**，仅凭日志看不出真实原因。
+
+### 根因（三层叠加）
+
+1. **音频文件本身损坏**：mp3 在 offset 5179245 处混入非 MPEG 数据（`0x2c203733` = ASCII `, 73`），libsndfile/libmpg123 在 resync 限制（1024 字节）内无法重新同步，直接报错。
+2. **librosa 的回退无效**：`librosa.load()` → soundfile 失败后回退 `audioread`，而本机 audioread 只有 `rawread` 后端（不认 mp3），抛出无信息的异常 → 日志里的空错误串由此而来。
+3. **ffmpeg 兜底双重失效**：
+   - 本地 systemd 部署**没装 ffmpeg**（ffmpeg 只在 Docker 镜像里，见 `Dockerfile.gpu`）；
+   - `convert_audio_to_wav` 的兜底命令参数错误：`ffmpeg -f s16le ... -i input`，`-f s16le` 强制按**裸 PCM** 解析 mp3，即使装了 ffmpeg 也会失败。
+
+> 注意：`get_container_duration()` 依赖 `ffprobe`，本地未安装时静默返回 `None`（仅影响 m4a 时间戳缩放），不影响本次故障。
+
+### 修复
+
+`app/utils/audio.py` 的 `convert_audio_to_wav()` 改为三级解码链路，任一成功即返回：
+
+| 顺序 | 解码器 | 适用场景 |
+|------|--------|----------|
+| 1 | librosa / soundfile | 正常文件（精度最好，主路径不变） |
+| 2 | **PyAV 逐帧容错解码**（`_decode_audio_with_pyav`） | 含损坏帧/非法 MPEG 头的音频：坏包只丢弃当前帧，继续解码后续数据 |
+| 3 | ffmpeg CLI | Docker 镜像内置；命令修正为 `ffmpeg -i input -vn -ar 16000 -ac 1 -acodec pcm_s16le -y output` |
+
+同时：错误信息聚合三层失败原因（不再是空串）；`av` 提升为 `pyproject.toml` 显式依赖（此前仅由 vllm 传递引入）。
+
+### 验证
+
+构造损坏 mp3（在 20KB 处插入 40KB 垃圾字节）复现：
+
+- 修复前：soundfile 报错 → audioread 无后端 → ffmpeg 不存在 → 500
+- 修复后：PyAV 容错解码丢弃 9 个坏包，8s 音频恢复 7.92s，转换成功
+
+回归测试：`.venv/bin/python -m pytest tests/test_audio_decode_fallback.py -v`（正常 mp3 走 librosa、损坏 mp3 走 PyAV、不可解码文件报完整分层错误、ffmpeg 命令不含 `-f s16le`）。
+
+### 关键教训
+
+- 损坏音频文件是常态（下载中断、拼接错误），解码链路必须有**容错层**，且不依赖可能缺失的系统二进制；
+- fallback 分支要保留真实异常（原实现 `str(e)` 引用的是外层异常，日志为空，掩盖了根因）。后续已在本机 `sudo apt install -y ffmpeg`（6.1.1）使 ffmpeg CLI 路径可用（Docker 镜像本就内置）。
+
+## 2026-09-28：显存策略改为「sleep mode + 15s 空闲休眠」
+
+### 背景
+
+同一张卡上还有 ComfyUI、llama.cpp 等服务，vLLM 引擎空闲常驻 17GB（ASR 8.8GB + aligner 6.0GB + 主进程 2.1GB）会挤爆其它服务，并导致本项目声纹（CAM++）CUDA OOM 降级：
+
+```
+Voiceprint enrichment failed; keep diarization labels: CUDA out of memory. Tried to allocate 3.84 GiB.
+```
+
+### 方案：进程常驻 + 只归还显存（vLLM sleep mode）
+
+| | 旧行为（销毁子进程） | 新行为（sleep mode） |
+|---|---|---|
+| 空闲动作 | `shutdown()` 杀 EngineCore | `sleep(level=1)`：权重 offload 到 CPU、丢弃 KV cache |
+| 释放显存 | 全部（除残留 ~1.84GiB） | ASR 6.45GiB / aligner 3.91GiB（各残留 ~1.84GiB） |
+| 恢复耗时 | 重载 11~21s | `wake_up()` **0.2~0.5s** |
+| 空闲阈值 | 900s | **15s**（`QWEN_IDLE_UNLOAD_TIMEOUT`） |
+
+实现要点：
+
+- `Qwen3VLLMBackend` 新增 `sleep_main` / `sleep_aligner` / `wake_main` / `wake_aligner`，用 `threading.RLock` 与推理入口（`_main_in_use` / `_aligner_in_use`）互斥：使用中不睡、睡眠中自动唤醒（覆盖 `_run_generate`、`_decode_stream`、`align_transcript` 全部推理入口）；
+- `RuntimeRouter` 空闲监控改为调用 `sleep`（不支持 sleep 的引擎回退 `unload`）；`release()` 时刷新 `_last_use`（空闲从「请求结束」而非「请求开始」起算）；
+- **aligner 独立生命周期**：自己的活跃计数与空闲计时，忙时绝不释放。旧实现只在主引擎卸载时跟着 `shutdown`，对齐阶段主引擎一旦空闲就会把正在干活的 aligner 一起关掉；
+- 声纹推理前主动 `release_vllm_gpu()` 让引擎休眠腾显存；
+- `QWEN_ENABLE_SLEEP_MODE=false` 可整体回退旧行为。
+
+### 踩坑：sleep + multimodal cache = AssertionError
+
+启用 sleep 后，唤醒再次推理相同音频时报：
+
+```
+ERROR [core.py] AssertionError: Expected a cached item for mm_hash='48bfbe6c...'
+```
+
+根因：vLLM 的 multimodal processor cache（`mm_processor_cache_gb`，默认 4GiB）内部状态在 sleep/wake 后失效，重复音频命中失效项（`vllm/multimodal/cache.py:360`）。
+
+解决：启用 sleep 时固定传 `mm_processor_cache_gb=0`（`qwen3_vllm.py`）。该缓存位于 CPU 内存，禁用不影响显存。
+
+实测（本机 vLLM 0.19.0 + Confucius4-R2T2）：
+
+```
+load=11.0s → before-sleep infer ok → sleep=3.7s（释放 6.45GiB）→ wake=0.38s → after-wake infer ok
+```
+
+### 效果
+
+休眠态显存 **17GB → 2.8GB**（主进程 1.9GB + 引擎残留 0.95GB）；请求到来 0.2~0.5s 唤醒，基本无感。
+
+回归测试：`.venv/bin/python -m pytest tests/test_idle_sleep.py -v`（14 项：空闲 sleep 而非卸载、活跃请求不睡、无 sleep 能力回退卸载、aligner 忙不睡/可单独睡、空闲计时刷新、声纹让路、sleep 与推理互斥与自动唤醒、vLLM 参数组装）。
+
+### 附带修复：声纹（CAM++）OOM 的真正根因
+
+实测（2026-09-28 09:47）发现：引擎 `sleep` 后整卡只剩 4.51GB，但 2 秒后声纹仍然 OOM：
+
+```
+09:47:53 Sleep mode freed 7.6 GiB, 4.51 GiB still in use   ← 引擎已全部归还
+09:47:54 Loading CAM++ speaker embedding provider: device=cuda:0
+09:47:56 Voiceprint enrichment failed: CUDA OOM. Tried to allocate 1.92 GiB ... 1.62 GiB free
+```
+
+根因不在 vLLM：`embedding_service.py` 把**同一说话人的所有语句拼接成一整段音频**（去掉静音，可能几千秒）后整体送入 CAM++，TDNN 中间激活直接爆显存；失败后 ~17GB 变成 torch reserved **不会自动归还**（下次请求继续 OOM）。即：声纹从未成功过，一直在“撞 OOM → 降级”。
+
+修复（两层）：
+
+1. **按 ASR 分段提取**（`SpeakerEmbeddingService._extract_segment_embeddings`）：用识别出的分段作为提取单位（每段通常几秒，符合 CAM++ 短时假设），逐段提取后按时长加权融合；单段超 `VOICEPRINT_MAX_CHUNK_SEC`(30s) 再细分，短于 `VOICEPRINT_MIN_CHUNK_SEC`(1s) 的段跳过（全部过短时退化为拼接提取，避免整人丢失）。
+2. **推理设备默认 `auto`**（`VOICEPRINT_DEVICE=auto`）：有 CUDA 用 GPU、无则 CPU。分段限长后 GPU 不再有风险：实测 30s 音频峰值 840MiB（reserved）/ 712MiB，比 CPU 快 5~8 倍（30s 音频 37ms vs 291ms；实测 10 段×24s GPU 2.6s，含首次 CUDA 初始化）。提取完 `torch.cuda.empty_cache()` 归还缓存（reserved 不会自动释放）。
+
+回归测试：`.venv/bin/python -m pytest tests/test_voiceprint_embedding_chunking.py -v`（11 项：短音频单次、长音频切片与时长加权、尾片丢弃、参考音频全路径、按分段提取、超长单段细分、短段跳过、全短段兑底、低于最小时长跳过、设备默认 CPU、provider 使用配置设备）。

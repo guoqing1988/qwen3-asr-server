@@ -88,6 +88,7 @@ CPU 镜像使用 QwenASR Rust，并自动选择 `qwen3-asr-0.6b`。x86_64 需要
 - NVIDIA GPU + 驱动（显存 8GB+，推荐 12GB+ 以启用词级时间戳）
 - CUDA 12.8（按 PyTorch cu128 编译）
 - [uv](https://docs.astral.sh/uv/) 包管理器（安装：`curl -LsSf https://astral.sh/uv/install.sh | sh`）
+- `ffmpeg` / `ffprobe`（音频解码兜底与容器时长探测；Docker 镜像已内置）：`sudo apt install -y ffmpeg`
 
 **1. 创建虚拟环境并安装依赖**
 
@@ -139,8 +140,9 @@ cp .env.example .env   # 如不存在则手动创建
 | `QWEN_STREAM_SEGMENT_MAX_SEC` | `12` | 滑动窗口：单段最大时长（秒），超时强制落定并开新段 |
 | `QWEN_STREAM_SILENCE_SEC` | `2.0` | 静音切段阈值（秒） |
 | `QWEN_STREAM_OVERLAP_SEC` | `1.0` | 段间重叠音频（秒），减弱强制切段处丢词 |
-| `QWEN_IDLE_UNLOAD_TIMEOUT` | `900` | 空闲卸载超时（秒），0 禁用；`900` = 15 分钟无请求自动卸载 |
-| `QWEN_LOW_VRAM_THRESHOLD_GB` | `6.0` | 显存压力卸载阈值 |
+| `QWEN_IDLE_UNLOAD_TIMEOUT` | `15` | 空闲休眠超时（秒），0 禁用；`15` = 15 秒无请求即 sleep（权重 offload 到 CPU，唤醒 <1s） |
+| `QWEN_ENABLE_SLEEP_MODE` | `true` | 启用 vLLM sleep mode（进程常驻、只归还显存）；`false` 回退为销毁子进程（重载 11~21s） |
+| `QWEN_LOW_VRAM_THRESHOLD_GB` | `6.0` | 显存压力休眠阈值 |
 
 > **路径说明**：模型统一放在 `/data1/models`（不放在项目目录内）。
 > `models.json` 支持 `${VAR:-default}` 占位符，换模型/换路径只改 `.env`：
@@ -282,10 +284,13 @@ vLLM 引擎初始化在特定宿主环境（如 CPU 电压不稳、驱动兼容�
 - `QWEN_MAX_NUM_BATCHED_TOKENS=2048`：直接决定 encoder cache 预算
 - `QWEN_ENFORCE_EAGER=true`：关闭 CUDA graph / torch.compile，省约 0.5GB
 
-服务按两级策略释放显存，让位给同一 GPU 上的其他服务（如 ComfyUI）：
+服务按两级策略归还显存，让位给同一 GPU 上的其他服务（如 ComfyUI）：
 
-1. **空闲自动卸载**：`QWEN_IDLE_UNLOAD_TIMEOUT` 秒无请求即卸载全部引擎（生产设 `900` = 15 分钟）。
-2. **显存压力自适应卸载**：GPU 可用显存低于 `QWEN_LOW_VRAM_THRESHOLD_GB`（默认 6GB）且引擎空闲超过 `QWEN_VRAM_PRESSURE_COOLDOWN_S`（默认 60s）时，立即卸载引擎释放显存（日志标记 `(vram pressure)`）。
+1. **空闲休眠**：`QWEN_IDLE_UNLOAD_TIMEOUT` 秒无请求即 `sleep`（当前生产设 `15`）——权重 offload 到 CPU、丢弃 KV cache，**vLLM 子进程常驻**，下次请求 `wake_up` 仅 0.1~0.4s（实测）。关闭 `QWEN_ENABLE_SLEEP_MODE` 则回退为旧行为（销毁子进程，重载 11~21s）。
+2. **显存压力休眠**：GPU 可用显存低于 `QWEN_LOW_VRAM_THRESHOLD_GB`（默认 6GB）且引擎空闲超过 `QWEN_VRAM_PRESSURE_COOLDOWN_S`（默认 60s）时休眠引擎（日志标记 `(vram pressure)`）；不支持 sleep 的引擎回退为卸载。
+
+> `forced aligner` 有独立的活跃计数与空闲计时：忙时绝不释放，也不会被主引擎连坐；声纹（CAM++）推理前会主动让 vLLM 引擎休眠以避让显存。
+> 启用 sleep 时项目固定传 `mm_processor_cache_gb=0`：否则唤醒后重复音频会命中失效的 multimodal cache 并报 `AssertionError`。
 
 ## 从源码构建镜像
 
@@ -405,6 +410,7 @@ services:
       VOICEPRINT_ENABLED: ${VOICEPRINT_ENABLED:-true}
       VOICEPRINT_DB_PATH: ${VOICEPRINT_DB_PATH:-./data/voiceprints.sqlite3}
       VOICEPRINT_MATCH_THRESHOLD: ${VOICEPRINT_MATCH_THRESHOLD:-0.70}
+      VOICEPRINT_DEVICE: ${VOICEPRINT_DEVICE:-auto}
     restart: unless-stopped
 ```
 
@@ -480,6 +486,7 @@ uv run python -m app.utils.download_models --export-dir ./models
 | `VOICEPRINT_ENABLED` | `true` | 是否启用 ASR 结果声纹身份匹配 |
 | `VOICEPRINT_DB_PATH` | `./data/voiceprints.sqlite3` | SQLite + sqlite-vec 声纹数据库路径 |
 | `VOICEPRINT_MATCH_THRESHOLD` | `0.70` | 说话人身份匹配阈值 |
+| `VOICEPRINT_DEVICE` | `auto` | 声纹推理设备。默认 `auto`：有 CUDA 用 GPU（分段已限长 ≤30s，峰值约 840MiB），无 CUDA 降级 CPU（慢 5~8 倍） |
 
 启用后通过 `/api/v1/voiceprint-speakers` 注册说话人（名字 + 单人音频样本），
 ASR 转写结果中匹配到的 `speaker_id` 会自动替换为注册名；未注册或匹配不

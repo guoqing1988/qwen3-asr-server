@@ -665,13 +665,14 @@ curl -X DELETE 'http://localhost:9101/api/v1/voiceprint-speakers/{speaker_id}'
 | `QWEN_STREAM_SEGMENT_MAX_SEC` | `12` | **滑动窗口**：单段最大时长（秒）。超时即落定当前段并开新段，保证每轮解码窗口恒定、不随会话时长增长（适合小时/天级长时任务） |
 | `QWEN_STREAM_SILENCE_SEC` | `2.0` | 静音切段阈值（秒）：累计静音超过即落定（自然句边界优先） |
 | `QWEN_STREAM_OVERLAP_SEC` | `1.0` | 段间重叠音频（秒）：新段开头预置上一段尾部音频，减弱强制切段处丢词；识别结果做边界去重（大小写不敏感） |
-| `QWEN_IDLE_UNLOAD_TIMEOUT` | `300` | 无请求超过该秒数后卸载 vLLM 引擎释放显存；`0` 禁用（本项目设 `900` = 15 分钟） |
-| `QWEN_LOW_VRAM_THRESHOLD_GB` | `6.0` | 可用显存低于该值且引擎空闲时触发显存压力卸载 |
-| `QWEN_VRAM_PRESSURE_COOLDOWN_S` | `60` | 显存压力卸载所需的引擎空闲秒数 |
+| `QWEN_IDLE_UNLOAD_TIMEOUT` | `15` | 无请求超过该秒数后让 vLLM 引擎休眠（sleep：权重 offload 到 CPU、进程常驻，唤醒 <1s）；`0` 禁用（本项目设 `15` = 15 秒） |
+| `QWEN_LOW_VRAM_THRESHOLD_GB` | `6.0` | 可用显存低于该值且引擎空闲时触发显存压力休眠 |
+| `QWEN_VRAM_PRESSURE_COOLDOWN_S` | `60` | 显存压力休眠所需的引擎空闲秒数 |
 | `ASR_DEFAULT_HOTWORDS` | （空） | 服务端预设热词（英文逗号分隔，建议 ≤512 字符），与请求热词（OpenAI `prompt` / 原生 `vocabulary_id`）合并后注入识别上下文；热词为倾向性采纳而非强制替换 |
 | `VOICEPRINT_ENABLED` | `true` | 是否启用 ASR 结果声纹身份匹配 |
 | `VOICEPRINT_DB_PATH` | `./data/voiceprints.sqlite3` | SQLite + sqlite-vec 声纹数据库路径 |
 | `VOICEPRINT_MATCH_THRESHOLD` | `0.70` | 说话人身份匹配阈值 |
+| `VOICEPRINT_DEVICE` | `auto` | 声纹推理设备。默认 `auto`：有 CUDA 用 GPU（分段已限长 ≤30s，峰值约 840MiB），无 CUDA 降级 CPU |
 
 ### 显存控制与空闲卸载
 
@@ -698,9 +699,9 @@ QWEN_WARMUP_FORCED_ALIGNER=false        # aligner 懒加载
 | 完整服务（+ VAD / CAM++ / Paraformer / 标点） | ~8.7GB |
 | 显式请求词级时间戳（+ aligner） | ~12GB（峰值） |
 
-**空闲卸载**：设置 `QWEN_IDLE_UNLOAD_TIMEOUT` 后，后台监控会在连续无请求超过该时长时卸载 vLLM 引擎（主模型 + forced aligner），终止其 EngineCore 子进程并将显存归还系统。下一次请求会自动触发懒加载重建，约需 30–60 秒。正在执行或排队等待引擎的请求不会被中途卸载，监控仅在引擎完全空闲时触发。设置 `0` 可让模型常驻不卸载；生产环境常用 `900`（15 分钟）。
+**空闲休眠**：设置 `QWEN_IDLE_UNLOAD_TIMEOUT` 后，后台监控会在连续无请求超过该时长时让 vLLM 引擎 `sleep`——权重 offload 到 CPU、丢弃 KV cache，**子进程常驻**，下次请求自动 `wake_up`（实测 0.1~0.4 秒）。正在执行或等待引擎的请求不会被休眠，forced aligner 有独立的活跃计数与空闲计时（忙时不睡）。设置 `0` 可让模型常驻不休眠；本项目生产设 `15`（15 秒）。关闭 `QWEN_ENABLE_SLEEP_MODE` 则回退为旧行为（销毁 EngineCore 子进程，重新加载需 11~21 秒）。
 
-**显存压力卸载**：可用显存低于 `QWEN_LOW_VRAM_THRESHOLD_GB` 且引擎空闲超过 `QWEN_VRAM_PRESSURE_COOLDOWN_S` 时自动让位给其他进程。
+**显存压力休眠**：可用显存低于 `QWEN_LOW_VRAM_THRESHOLD_GB` 且引擎空闲超过 `QWEN_VRAM_PRESSURE_COOLDOWN_S` 时自动让位给其他进程。
 
 > **注意**：若不用 `QWEN_KV_CACHE_MEMORY_BYTES` 而只靠 utilization，调得过低会导致 vLLM 启动失败（主引擎低于约 0.16、aligner 低于约 0.12 时，扣除权重后无剩余空间分配 KV cache）。
 
