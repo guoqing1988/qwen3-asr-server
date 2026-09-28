@@ -15,6 +15,7 @@ dependencies = [
   "sqlite-vec>=0.1.9,<0.2",
   "soundfile==0.13.1",
   "librosa==0.11.0",
+  "av>=17.0.1,<18",
   "textual>=0.79,<1",
   "websockets==16.0",
   "addict==2.4.0",

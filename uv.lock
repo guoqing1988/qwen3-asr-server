@@ -3191,6 +3191,7 @@ version = "1.0.3"
 source = { virtual = "." }
 dependencies = [
     { name = "addict" },
+    { name = "av" },
     { name = "datasets" },
     { name = "fastapi" },
     { name = "fastapi-offline" },
@@ -3223,6 +3224,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "addict", specifier = "==2.4.0" },
+    { name = "av", specifier = ">=17.0.1,<18" },
     { name = "datasets", specifier = "==3.6.0" },
     { name = "fastapi", specifier = "==0.128.0" },
     { name = "fastapi-offline", specifier = "==1.7.6" },

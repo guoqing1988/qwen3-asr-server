@@ -350,10 +350,69 @@ def save_audio_array(
         raise DefaultServerErrorException(f"保存音频文件失败: {str(e)}")
 
 
+def _decode_audio_with_pyav(input_path: str, target_sr: int) -> np.ndarray:
+    """使用 PyAV 逐帧容错解码音频为 mono float32
+
+    PyAV 内置 FFmpeg 解码器，对含损坏帧/非法 MPEG 头的音频容错能力远强于
+    librosa/soundfile：单个坏帧只丢弃该帧，解码继续；而 libsndfile 会直接报错。
+
+    Args:
+        input_path: 输入音频文件路径
+        target_sr: 目标采样率
+
+    Returns:
+        一维 float32 数组（幅值范围 -1~1）
+
+    Raises:
+        DefaultServerErrorException: 无法解码出任何音频数据
+    """
+    import av
+
+    container = av.open(input_path)
+    try:
+        stream = container.streams.audio[0]
+        resampler = av.AudioResampler(format="s16", layout="mono", rate=target_sr)
+        chunks: list[np.ndarray] = []
+        failed_packets = 0
+        for packet in container.demux(stream):
+            if packet.size == 0:
+                continue
+            try:
+                for frame in stream.decode(packet):
+                    for resampled in resampler.resample(frame):
+                        chunks.append(resampled.to_ndarray().reshape(-1))
+            except Exception:
+                # 损坏的数据包：丢弃该包，继续解码后续数据
+                failed_packets += 1
+                continue
+
+        # flush 重采样器，取出内部缓存的尾部样本
+        try:
+            for resampled in resampler.resample(None):
+                chunks.append(resampled.to_ndarray().reshape(-1))
+        except Exception:
+            pass
+    finally:
+        container.close()
+
+    if not chunks:
+        raise DefaultServerErrorException("PyAV 未能解码出任何音频数据")
+
+    if failed_packets:
+        logger.warning(f"PyAV 容错解码丢弃损坏数据包 {failed_packets} 个: {input_path}")
+
+    return np.concatenate(chunks).astype(np.float32) / 32768.0
+
+
 def convert_audio_to_wav(
     input_path: str, output_path: Optional[str] = None, target_sr: int = 16000
 ) -> str:
     """转换音频文件为WAV格式
+
+    依次尝试三种解码路径，任一成功即返回：
+    1. librosa/soundfile（正常文件首选，精度最好）
+    2. PyAV 逐帧容错解码（处理 mp3 等含损坏帧的文件）
+    3. ffmpeg CLI（Docker 镜像内置，本地未安装则跳过）
 
     Args:
         input_path: 输入文件路径
@@ -369,32 +428,50 @@ def convert_audio_to_wav(
     if not output_path:
         output_path = input_path.rsplit(".", 1)[0] + ".wav"
 
+    errors: list[str] = []
+
+    # 1) librosa/soundfile
     try:
-        # 使用librosa加载并重采样
         audio_data, _ = librosa.load(input_path, sr=target_sr)
         sf.write(output_path, audio_data, target_sr, format="WAV")
         return output_path
-
     except Exception as e:
-        # 尝试使用ffmpeg转换
-        try:
-            subprocess.run(
-                [
-                    "ffmpeg",
-                    "-f", "s16le",
-                    "-ar", str(target_sr),
-                    "-ac", "1",
-                    "-i", input_path,
-                    "-acodec", "pcm_s16le",
-                    output_path,
-                    "-y",
-                ],
-                check=True,
-                capture_output=True,
-            )
-            return output_path
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            raise DefaultServerErrorException(f"音频格式转换失败: {str(e)}")
+        errors.append(f"librosa: {e!r}")
+
+    # 2) PyAV 逐帧容错解码
+    try:
+        audio_data = _decode_audio_with_pyav(input_path, target_sr)
+        sf.write(output_path, audio_data, target_sr, format="WAV")
+        logger.warning(f"音频经 PyAV 容错解码后转换成功: {input_path} -> {output_path}")
+        return output_path
+    except Exception as e:
+        errors.append(f"pyav: {e!r}")
+
+    # 3) ffmpeg CLI 兜底
+    try:
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel", "error",
+                "-i", input_path,
+                "-vn",
+                "-ar", str(target_sr),
+                "-ac", "1",
+                "-acodec", "pcm_s16le",
+                "-y", output_path,
+            ],
+            check=True,
+            capture_output=True,
+        )
+        return output_path
+    except FileNotFoundError:
+        errors.append("ffmpeg: 未安装")
+    except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or b"").decode("utf-8", "ignore").strip()
+        errors.append(f"ffmpeg: {stderr or f'退出码 {e.returncode}'}")
+
+    raise DefaultServerErrorException(f"音频格式转换失败: {'; '.join(errors)}")
 
 
 def normalize_audio_for_asr(audio_path: str, target_sr: int = 16000) -> NormalizedAudio:
