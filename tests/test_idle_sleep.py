@@ -14,6 +14,7 @@ import time
 import unittest
 from unittest import mock
 
+from app.core.config import settings
 from app.services.asr.qwen3_vllm import Qwen3VLLMBackend
 from app.services.asr.runtime.router import RuntimeFamily, RuntimeRouter
 
@@ -115,6 +116,44 @@ class IdleSleepRouterTest(unittest.TestCase):
 
         self.assertEqual(engine.unloaded, 1)
         self.assertNotIn(key, router._shared_engines)
+
+    def test_long_idle_fully_unloads_after_shutdown_window(self) -> None:
+        engine = _FakeEngine()
+        router, key = _make_router(engine)
+        with mock.patch.object(settings, "QWEN_SHUTDOWN_AFTER_S", 60):
+            router._last_use[key] = time.monotonic() - 90
+
+            asyncio.run(router._unload_idle_engines(15))
+
+        # 二级：超过 shutdown 窗口 → 彻底卸载（连 sleep 残留一起归还）
+        self.assertEqual(engine.unloaded, 1)
+        self.assertEqual(engine.slept, 0)
+        self.assertNotIn(key, router._shared_engines)
+
+    def test_shutdown_window_disabled_keeps_sleeping(self) -> None:
+        engine = _FakeEngine()
+        router, key = _make_router(engine)
+        router._last_use[key] = time.monotonic() - 10_000
+
+        with mock.patch.object(settings, "QWEN_SHUTDOWN_AFTER_S", 0):
+            asyncio.run(router._unload_idle_engines(15))
+
+        self.assertEqual(engine.slept, 1)
+        self.assertEqual(engine.unloaded, 0)
+
+    def test_busy_aligner_blocks_full_unload(self) -> None:
+        engine = _FakeEngine(aligner_loaded=True)
+        engine._aligner_busy = True
+        router, key = _make_router(engine)
+        with mock.patch.object(settings, "QWEN_SHUTDOWN_AFTER_S", 60):
+            router._last_use[key] = time.monotonic() - 90
+
+            asyncio.run(router._unload_idle_engines(15))
+
+        # 对齐进行中：不连坐卸载，但主引擎本身仍可休眠
+        self.assertEqual(engine.unloaded, 0)
+        self.assertEqual(engine.slept, 1)
+        self.assertEqual(engine.aligner_slept, 0)
 
     def test_busy_aligner_is_not_slept(self) -> None:
         engine = _FakeEngine(aligner_loaded=True)

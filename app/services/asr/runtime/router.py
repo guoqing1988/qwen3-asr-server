@@ -363,10 +363,12 @@ class RuntimeRouter:
                 logger.warning("Idle unload check failed: %s", exc)
 
     async def _unload_idle_engines(self, timeout: float, vram_pressure: bool = False) -> None:
-        """空闲时归还 vLLM 显存。
+        """空闲时归还 vLLM 显存（两级）。
 
-        - 支持 sleep mode 的引擎：调用 sleep（进程常驻、唤醒 <1s，不销毁子进程）；
-        - 不支持的引擎：回退到原来的卸载（销毁 EngineCore 子进程）；
+        - 一级（空闲 ≥ idle 阈值）：支持 sleep mode 的引擎调 sleep（进程常驻、
+          唤醒 <1s）；不支持的引擎回退到卸载；
+        - 二级（空闲 ≥ ``QWEN_SHUTDOWN_AFTER_S``）：彻底卸载，连 sleep 残留的
+          CUDA context 一起归还（下次请求懒加载）；
         - aligner 独立计时与释放：忙时绝不释放，也不被主引擎连坐。
 
         普通模式用 idle 超时；压力模式用冷却期。
@@ -403,8 +405,33 @@ class RuntimeRouter:
                 continue
 
             idle_for = now - last_use
+            supports_sleep = getattr(engine, "supports_sleep", lambda: False)()
+
+            # 二级：长时间空闲 → 彻底卸载（含 aligner；对齐中则不连坐）
+            shutdown_after = settings.QWEN_SHUTDOWN_AFTER_S
+            if (
+                supports_sleep
+                and shutdown_after > 0
+                and idle_for >= shutdown_after
+                and not getattr(engine, "aligner_is_busy", lambda: False)()
+            ):
+                logger.info(
+                    "Engine %s idle for %.0fs, fully unloading to release reserved GPU memory",
+                    runtime_key[1],
+                    idle_for,
+                )
+                try:
+                    await asyncio.to_thread(engine.unload)
+                except Exception as exc:  # noqa: BLE001 - 释放失败不阻断监控
+                    logger.error("Failed to unload engine %s: %s", runtime_key[1], exc)
+                    continue
+                self._shared_engines.pop(runtime_key, None)
+                self._loaded_model_ids.discard(runtime_key[1])
+                logger.info("Engine %s unloaded, GPU memory released", runtime_key[1])
+                continue
+
             try:
-                if getattr(engine, "supports_sleep", lambda: False)():
+                if supports_sleep:
                     if getattr(engine, "is_sleeping", lambda: False)():
                         continue  # 已休眠，不重复释放/打日志
                     await asyncio.to_thread(engine.sleep)

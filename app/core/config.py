@@ -89,6 +89,10 @@ class Settings:
     # sleep mode：启用后空闲时把权重 offload 到 CPU（进程常驻，唤醒 <1s）；
     # 关闭则回退为销毁子进程（重载需十余秒）
     QWEN_ENABLE_SLEEP_MODE: bool = True
+    # sleep 之后多久彻底卸载（秒，0=禁用）：sleep 会留下 CUDA context 等残留
+    # （两个引擎合计约 1.9GB），长时间空闲改走 shutdown 可连残留一起归还，
+    # 代价是下次请求需重新加载（11~21s）
+    QWEN_SHUTDOWN_AFTER_S: int = 600
 
     # 显存压力卸载配置：可用显存低于阈值且引擎空闲时让位其他 GPU 服务
     QWEN_LOW_VRAM_THRESHOLD_GB: float = 15.0
@@ -212,6 +216,9 @@ class Settings:
         self.QWEN_ENABLE_SLEEP_MODE = (
             os.getenv("QWEN_ENABLE_SLEEP_MODE", str(self.QWEN_ENABLE_SLEEP_MODE)).lower()
             in {"1", "true", "yes", "on"}
+        )
+        self.QWEN_SHUTDOWN_AFTER_S = int(
+            os.getenv("QWEN_SHUTDOWN_AFTER_S", str(self.QWEN_SHUTDOWN_AFTER_S))
         )
 
         self.QWEN_LOW_VRAM_THRESHOLD_GB = float(
