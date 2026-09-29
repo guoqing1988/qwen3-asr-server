@@ -21,6 +21,7 @@ from app.core.device import detect_device
 from app.services.asr.engines import ASRFullResult, ASRSegmentResult
 from app.services.speaker.config import (
     VOICEPRINT_MAX_CHUNK_SEC,
+    VOICEPRINT_MAX_SEGMENTS_PER_SPEAKER,
     VOICEPRINT_MIN_CHUNK_SEC,
 )
 from app.services.speaker.domain import SpeakerEmbedding
@@ -160,6 +161,54 @@ class LongAudioChunkingTest(unittest.TestCase):
         vector = embeddings["Speaker1"].vector
         self.assertAlmostEqual(float(vector[0] / vector[1]), 0.6, places=3)
         self.assertAlmostEqual(embeddings["Speaker1"].duration_sec, 25.0, places=2)
+
+    def test_excessive_segments_are_sampled(self) -> None:
+        provider = _FakeProvider()
+        service = SpeakerEmbeddingService(provider)
+
+        seg_count = 50  # > VOICEPRINT_MAX_SEGMENTS_PER_SPEAKER
+        seg_sec = 4.0
+        audio = np.full(int(seg_count * seg_sec * SAMPLE_RATE), 0.3, dtype=np.float32)
+        asr_result = ASRFullResult(
+            text="x",
+            duration=seg_count * seg_sec,
+            segments=[
+                ASRSegmentResult(
+                    text=str(index),
+                    start_time=index * seg_sec,
+                    end_time=(index + 1) * seg_sec,
+                    speaker_id="Speaker1",
+                )
+                for index in range(seg_count)
+            ],
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "many.wav"
+            _write_wav(path, audio)
+            embeddings = service.extract_local_speaker_embeddings(
+                audio_path=str(path),
+                asr_result=asr_result,
+                timestamp_scale=1.0,
+            )
+
+        # 分段过多 → 只提取采样后的数量，但时长仍按全部语音统计
+        self.assertEqual(len(provider.calls), VOICEPRINT_MAX_SEGMENTS_PER_SPEAKER)
+        self.assertAlmostEqual(
+            embeddings["Speaker1"].duration_sec, seg_count * seg_sec, places=1
+        )
+
+    def test_sample_chunks_evenly_spaced(self) -> None:
+        chunks = [np.full(index + 1, float(index), dtype=np.float32) for index in range(50)]
+
+        selected = SpeakerEmbeddingService._sample_chunks(chunks, 30)
+
+        self.assertEqual(len(selected), 30)
+        self.assertEqual(float(selected[0][0]), 0.0)  # 首段入选
+        self.assertGreater(float(selected[-1][0]), 40.0)  # 覆盖到时间轴尾部
+        # 不超限（含 limit=0 表示不限制）时原样返回
+        self.assertIs(SpeakerEmbeddingService._sample_chunks(chunks, 0), chunks)
+        self.assertIs(SpeakerEmbeddingService._sample_chunks(chunks, 50), chunks)
 
     def test_oversized_single_segment_is_split(self) -> None:
         provider = _FakeProvider()

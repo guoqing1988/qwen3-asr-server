@@ -9,4 +9,7 @@ VOICEPRINT_MIN_SPEECH_SEC = 2.0
 VOICEPRINT_MAX_CHUNK_SEC = 30.0
 # 尾片短于此值则丢弃（太短提取出的 embedding 不可靠）
 VOICEPRINT_MIN_CHUNK_SEC = 1.0
+# 每个说话人最多参与融合的分段数（0=不限制）。长对话可能有上百段，按本值
+# 等间隔采样：centroid embedding 用几十段估计已足够稳定，可明显缩短提取耗时。
+VOICEPRINT_MAX_SEGMENTS_PER_SPEAKER = 30
 VOICEPRINT_AUTO_CREATE_SCHEMA = True

@@ -13,6 +13,7 @@ from app.services.asr.engines import ASRFullResult
 
 from .config import (
     VOICEPRINT_MAX_CHUNK_SEC,
+    VOICEPRINT_MAX_SEGMENTS_PER_SPEAKER,
     VOICEPRINT_MIN_CHUNK_SEC,
     VOICEPRINT_MIN_SPEECH_SEC,
 )
@@ -143,13 +144,12 @@ class SpeakerEmbeddingService:
 
         过短的分段（< ``VOICEPRINT_MIN_CHUNK_SEC``）的 embedding 不可靠，会跳过；
         若该说话人所有分段都过短，则退化为拼接后按上限切分提取，避免整人丢失。
+        有效分段过多时按 ``VOICEPRINT_MAX_SEGMENTS_PER_SPEAKER`` 等间隔采样。
         """
         max_samples = max(1, int(VOICEPRINT_MAX_CHUNK_SEC * sample_rate))
         min_samples = int(VOICEPRINT_MIN_CHUNK_SEC * sample_rate)
 
-        vectors: list[np.ndarray] = []
-        weights: list[float] = []
-        template: SpeakerEmbedding | None = None
+        chunks: list[np.ndarray] = []
         skipped: list[np.ndarray] = []
         total_samples = 0
 
@@ -166,21 +166,28 @@ class SpeakerEmbeddingService:
                 if chunk.size < min_samples:
                     skipped.append(chunk)
                     continue
-                chunk_embedding = self._provider.extract(chunk)
-                if template is None:
-                    template = chunk_embedding
-                vectors.append(
-                    np.asarray(chunk_embedding.vector, dtype=np.float32).reshape(-1)
-                )
-                weights.append(float(chunk.size))
+                chunks.append(chunk)
 
         if total_samples == 0:
             return None
 
-        if not vectors:
+        if not chunks:
             # 所有分段都过短：退化为拼接后提取（短段拼起来通常也不长）
             fallback = np.concatenate(skipped).astype(np.float32, copy=False)
             return self._extract_embedding_for_audio(fallback, sample_rate=sample_rate)
+
+        selected = self._sample_chunks(chunks, VOICEPRINT_MAX_SEGMENTS_PER_SPEAKER)
+        vectors: list[np.ndarray] = []
+        weights: list[float] = []
+        template: SpeakerEmbedding | None = None
+        for chunk in selected:
+            chunk_embedding = self._provider.extract(chunk)
+            if template is None:
+                template = chunk_embedding
+            vectors.append(
+                np.asarray(chunk_embedding.vector, dtype=np.float32).reshape(-1)
+            )
+            weights.append(float(chunk.size))
 
         weight_array = np.asarray(weights, dtype=np.float32)
         weight_array = weight_array / float(weight_array.sum())
@@ -193,6 +200,14 @@ class SpeakerEmbeddingService:
             sample_rate=template.sample_rate,
             duration_sec=duration_sec,
         )
+
+    @staticmethod
+    def _sample_chunks(chunks: list[np.ndarray], limit: int) -> list[np.ndarray]:
+        """分段过多时等间隔采样（覆盖整段时间轴），否则原样返回。"""
+        if limit <= 0 or len(chunks) <= limit:
+            return chunks
+        step = len(chunks) / limit
+        return [chunks[int(index * step)] for index in range(limit)]
 
     def extract_reference_embedding(self, *, audio_path: str) -> SpeakerEmbedding:
         audio_data, loaded_sample_rate = librosa.load(
