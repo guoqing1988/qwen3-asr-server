@@ -140,7 +140,8 @@ cp .env.example .env   # 如不存在则手动创建
 | `QWEN_STREAM_SEGMENT_MAX_SEC` | `12` | 滑动窗口：单段最大时长（秒），超时强制落定并开新段 |
 | `QWEN_STREAM_SILENCE_SEC` | `2.0` | 静音切段阈值（秒） |
 | `QWEN_STREAM_OVERLAP_SEC` | `1.0` | 段间重叠音频（秒），减弱强制切段处丢词 |
-| `QWEN_IDLE_UNLOAD_TIMEOUT` | `15` | 空闲休眠超时（秒），0 禁用；`15` = 15 秒无请求即 sleep（权重 offload 到 CPU，唤醒 <1s） |
+| `QWEN_IDLE_UNLOAD_TIMEOUT` | `15` | 一级释放：空闲休眠超时（秒），0 禁用；`15` = 15 秒无请求即 sleep（权重 offload 到 CPU，唤醒 <1s） |
+| `QWEN_SHUTDOWN_AFTER_S` | `600` | 二级释放：仍空闲超过该秒数则彻底 shutdown 子进程（连 sleep 残留的 CUDA context 一起归还），0 禁用；代价是下次请求重载 11~21s |
 | `QWEN_ENABLE_SLEEP_MODE` | `true` | 启用 vLLM sleep mode（进程常驻、只归还显存）；`false` 回退为销毁子进程（重载 11~21s） |
 | `QWEN_LOW_VRAM_THRESHOLD_GB` | `6.0` | 显存压力休眠阈值 |
 
@@ -286,8 +287,9 @@ vLLM 引擎初始化在特定宿主环境（如 CPU 电压不稳、驱动兼容�
 
 服务按两级策略归还显存，让位给同一 GPU 上的其他服务（如 ComfyUI）：
 
-1. **空闲休眠**：`QWEN_IDLE_UNLOAD_TIMEOUT` 秒无请求即 `sleep`（当前生产设 `15`）——权重 offload 到 CPU、丢弃 KV cache，**vLLM 子进程常驻**，下次请求 `wake_up` 仅 0.1~0.4s（实测）。关闭 `QWEN_ENABLE_SLEEP_MODE` 则回退为旧行为（销毁子进程，重载 11~21s）。
-2. **显存压力休眠**：GPU 可用显存低于 `QWEN_LOW_VRAM_THRESHOLD_GB`（默认 6GB）且引擎空闲超过 `QWEN_VRAM_PRESSURE_COOLDOWN_S`（默认 60s）时休眠引擎（日志标记 `(vram pressure)`）；不支持 sleep 的引擎回退为卸载。
+1. **空闲休眠（一级）**：`QWEN_IDLE_UNLOAD_TIMEOUT` 秒无请求即 `sleep`（当前生产设 `15`）——权重 offload 到 CPU、丢弃 KV cache，**vLLM 子进程常驻**，下次请求 `wake_up` 仅 0.1~0.4s（实测）。关闭 `QWEN_ENABLE_SLEEP_MODE` 则回退为旧行为（销毁子进程，重载 11~21s）。
+2. **长时间空闲彻底卸载（二级）**：仍空闲超过 `QWEN_SHUTDOWN_AFTER_S`（默认 `600` = 10 分钟）则 shutdown 子进程，把 sleep 残留的 CUDA context（两引擎合计约 1.9GB）也归还；下次请求走懒加载（11~21s）。设 `0` 禁用二级。
+3. **显存压力休眠**：GPU 可用显存低于 `QWEN_LOW_VRAM_THRESHOLD_GB`（默认 6GB）且引擎空闲超过 `QWEN_VRAM_PRESSURE_COOLDOWN_S`（默认 60s）时休眠引擎（日志标记 `(vram pressure)`）；不支持 sleep 的引擎回退为卸载。
 
 > `forced aligner` 有独立的活跃计数与空闲计时：忙时绝不释放，也不会被主引擎连坐；声纹（CAM++）推理前会主动让 vLLM 引擎休眠以避让显存。
 > 启用 sleep 时项目固定传 `mm_processor_cache_gb=0`：否则唤醒后重复音频会命中失效的 multimodal cache 并报 `AssertionError`。
@@ -421,6 +423,8 @@ services:
 git clone <your-repo> && git checkout feature/voiceprint
 
 # 2. 重建镜像（uv sync 自动包含 sqlite-vec 等依赖）
+#    注意：新增的 av（PyAV，音频解码兑底）属 C 扩展，不在 requirements.txt 的运行时
+#    增量安装列表里，必须 rebuild 镜像才能生效（未 rebuild 时仍有 ffmpeg CLI 兑底）
 ./build.sh -t gpu -v latest
 
 # 3. 准备 .env（端口、显存控制、声纹、鉴权）

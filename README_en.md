@@ -683,7 +683,8 @@ Settings in `.env.example`:
 | `QWEN_STREAM_SEGMENT_MAX_SEC` | `12` | **Sliding window**: max segment duration in seconds. On expiry the segment is finalized and a new one starts, keeping each decoding window constant regardless of session length (suited to hour/day-long realtime tasks) |
 | `QWEN_STREAM_SILENCE_SEC` | `2.0` | Silence threshold in seconds; accumulated silence beyond it finalizes the segment (natural sentence boundary preferred) |
 | `QWEN_STREAM_OVERLAP_SEC` | `1.0` | Inter-segment audio overlap in seconds: the new segment is primed with the previous segment's tail to reduce word loss on forced cuts; overlapping text is deduplicated (case-insensitive) |
-| `QWEN_IDLE_UNLOAD_TIMEOUT` | `15` | Sleep the vLLM engines (weights offloaded to CPU, processes stay resident, wake-up <1s) after this many seconds without requests; `0` disables (this project uses `15`) |
+| `QWEN_IDLE_UNLOAD_TIMEOUT` | `15` | First tier: sleep the vLLM engines (weights offloaded to CPU, processes stay resident, wake-up <1s) after this many seconds without requests; `0` disables (this project uses `15`) |
+| `QWEN_SHUTDOWN_AFTER_S` | `600` | Second tier: after this many more idle seconds the engines are fully shut down, returning the CUDA context that sleep keeps reserved; `0` disables; the next request needs a full reload (11-21s) |
 | `QWEN_LOW_VRAM_THRESHOLD_GB` | `6.0` | Trigger VRAM-pressure sleep when free VRAM drops below this value while engines are idle |
 | `QWEN_VRAM_PRESSURE_COOLDOWN_S` | `60` | Idle seconds required before a VRAM-pressure sleep |
 | `ASR_DEFAULT_HOTWORDS` | (empty) | Server-side preset hotwords (comma-separated, recommended ≤512 chars), merged with request hotwords (OpenAI `prompt` / native `vocabulary_id`) before being injected into the recognition context; hotwords are adopted preferentially, not forced |
@@ -734,6 +735,11 @@ are terminated and lazily reloaded).
 **VRAM-pressure sleep**: when free VRAM drops below `QWEN_LOW_VRAM_THRESHOLD_GB`
 and an engine has been idle longer than `QWEN_VRAM_PRESSURE_COOLDOWN_S`, it yields
 the GPU to other processes automatically.
+
+**Second-tier full release**: after `QWEN_SHUTDOWN_AFTER_S` (default `600`, i.e. 10
+minutes) of continued idleness the engine processes are shut down, returning the
+CUDA context that sleep mode keeps reserved (~1.9GB for both engines). The next
+request then triggers a lazy reload (11-21s).
 
 Note: if you rely on utilization alone (without `QWEN_KV_CACHE_MEMORY_BYTES`),
 going too low fails startup — the main engine needs at least ~0.16 and the forced

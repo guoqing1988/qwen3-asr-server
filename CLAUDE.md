@@ -63,9 +63,12 @@ Qwen3-ASR 服务（GPU 版）：Confucius4-R2T2（vLLM，默认且唯一 ASR 模
 - **懒加载自动重试**：引擎创建失败重试 3 次（间隔 5s/10s）
 - **降级启动**：qwen3 预加载失败不阻断启动，funasr 兜底
 - **forced aligner 懒加载**：aligner（另一个 vLLM 实例，约 3GB）不再在启动时预热，只在 `word_timestamps=true` 的请求到来时才加载（`QWEN_WARMUP_FORCED_ALIGNER=false`）——这是启动显存从 16GB 降到 6GB 的关键
-- **空闲休眠（sleep mode，默认开启）**：`QWEN_IDLE_UNLOAD_TIMEOUT`（秒，当前 `.env` 设 **15**）无请求即 `sleep`——权重 offload 到 CPU、丢弃 KV cache，**vLLM 进程常驻**，下次请求 `wake_up` 仅 **0.1~0.4s**（对比销毁重建 11~21s）。`QWEN_ENABLE_SLEEP_MODE=false` 可回退为销毁子进程
+- **空闲释放（两级，sleep mode 默认开启）**：
+  - 一级 `QWEN_IDLE_UNLOAD_TIMEOUT`（秒，当前 `.env` 设 **15**）：`sleep`——权重 offload 到 CPU、丢弃 KV cache，**vLLM 进程常驻**，下次请求 `wake_up` 仅 **0.1~0.4s**（对比销毁重建 11~21s）
+  - 二级 `QWEN_SHUTDOWN_AFTER_S`（秒，默认 **600**，0 禁用）：仍空闲则彻底 `shutdown` 子进程，把 sleep 残留的 CUDA context（两引擎合计约 1.9GB）一并归还
+  - `QWEN_ENABLE_SLEEP_MODE=false` 可整体回退为「空闲即销毁子进程」
 - **aligner 独立生命周期**：aligner 有自己的活跃计数与空闲计时，忙时绝不释放、也不被主引擎连坐（旧实现只在主引擎卸载时跟着 `shutdown`，对齐阶段主引擎一旦空闲就会把正在干活的 aligner 一起关掉）
-- **声纹（CAM++）按 ASR 分段提取**：逐段提取 embedding 后按时长加权融合（单段超 30s 再细分、<1s 丢弃、全短则拼接兑底）——把同一说话人数小时拼接音频整体送入会让 TDNN 中间激活爆显存（实测 CUDA OOM，且失败后 ~17GB reserved 不归还，声纹一直被降级为「仅保留 diarization 标签」）。分段限长后 GPU 安全：`.env` 默认 `VOICEPRINT_DEVICE=auto`（有 CUDA 用 GPU：30s 音频峰值约 840MiB、峰值 712MiB、快 CPU 5~8 倍），提取后 `empty_cache` 归还缓存
+- **声纹（CAM++）按 ASR 分段提取**：逐段提取 embedding 后按时长加权融合（单段超 30s 再细分、<1s 丢弃、全短则拼接兑底、每说话人最多 30 段等间隔采样）——把同一说话人数小时拼接音频整体送入会让 TDNN 中间激活爆显存（实测 CUDA OOM，且失败后 ~17GB reserved 不归还，声纹一直被降级为「仅保留 diarization 标签」）。分段限长后 GPU 安全：`.env` 默认 `VOICEPRINT_DEVICE=auto`（有 CUDA 用 GPU：30s 音频峰值约 840MiB、峰值 712MiB、快 CPU 5~8 倍），提取后 `empty_cache` 归还缓存
 - **声纹让路**：离线转写在声纹（CAM++）推理前主动让 vLLM 引擎 `sleep` 归还显存，避免 CUDA OOM（实测曾因两引擎常驻导致声纹识别降级为仅保留 diarization 标签）
 - **显存压力休眠**：可用显存低于 `QWEN_LOW_VRAM_THRESHOLD_GB` 且空闲超过 `QWEN_VRAM_PRESSURE_COOLDOWN_S` 即休眠让位；不支持 sleep 的引擎回退为卸载
 - **sleep 与多模态缓存的坑**：启用 sleep 时必须同时 `mm_processor_cache_gb=0`（代码内固定），否则唤醒后重复音频会命中失效的 multimodal processor cache 并抛 `AssertionError`（已实测；该缓存是 CPU 内存，禁用不影响显存）

@@ -665,7 +665,8 @@ curl -X DELETE 'http://localhost:9101/api/v1/voiceprint-speakers/{speaker_id}'
 | `QWEN_STREAM_SEGMENT_MAX_SEC` | `12` | **滑动窗口**：单段最大时长（秒）。超时即落定当前段并开新段，保证每轮解码窗口恒定、不随会话时长增长（适合小时/天级长时任务） |
 | `QWEN_STREAM_SILENCE_SEC` | `2.0` | 静音切段阈值（秒）：累计静音超过即落定（自然句边界优先） |
 | `QWEN_STREAM_OVERLAP_SEC` | `1.0` | 段间重叠音频（秒）：新段开头预置上一段尾部音频，减弱强制切段处丢词；识别结果做边界去重（大小写不敏感） |
-| `QWEN_IDLE_UNLOAD_TIMEOUT` | `15` | 无请求超过该秒数后让 vLLM 引擎休眠（sleep：权重 offload 到 CPU、进程常驻，唤醒 <1s）；`0` 禁用（本项目设 `15` = 15 秒） |
+| `QWEN_IDLE_UNLOAD_TIMEOUT` | `15` | 一级释放：无请求超过该秒数后让 vLLM 引擎休眠（sleep：权重 offload 到 CPU、进程常驻，唤醒 <1s）；`0` 禁用（本项目设 `15` = 15 秒） |
+| `QWEN_SHUTDOWN_AFTER_S` | `600` | 二级释放：仍空闲超过该秒数则彻底 shutdown 子进程（连 sleep 残留的 CUDA context 一起归还）；`0` 禁用；代价是下次请求重载 11~21s |
 | `QWEN_LOW_VRAM_THRESHOLD_GB` | `6.0` | 可用显存低于该值且引擎空闲时触发显存压力休眠 |
 | `QWEN_VRAM_PRESSURE_COOLDOWN_S` | `60` | 显存压力休眠所需的引擎空闲秒数 |
 | `ASR_DEFAULT_HOTWORDS` | （空） | 服务端预设热词（英文逗号分隔，建议 ≤512 字符），与请求热词（OpenAI `prompt` / 原生 `vocabulary_id`）合并后注入识别上下文；热词为倾向性采纳而非强制替换 |
@@ -702,6 +703,8 @@ QWEN_WARMUP_FORCED_ALIGNER=false        # aligner 懒加载
 **空闲休眠**：设置 `QWEN_IDLE_UNLOAD_TIMEOUT` 后，后台监控会在连续无请求超过该时长时让 vLLM 引擎 `sleep`——权重 offload 到 CPU、丢弃 KV cache，**子进程常驻**，下次请求自动 `wake_up`（实测 0.1~0.4 秒）。正在执行或等待引擎的请求不会被休眠，forced aligner 有独立的活跃计数与空闲计时（忙时不睡）。设置 `0` 可让模型常驻不休眠；本项目生产设 `15`（15 秒）。关闭 `QWEN_ENABLE_SLEEP_MODE` 则回退为旧行为（销毁 EngineCore 子进程，重新加载需 11~21 秒）。
 
 **显存压力休眠**：可用显存低于 `QWEN_LOW_VRAM_THRESHOLD_GB` 且引擎空闲超过 `QWEN_VRAM_PRESSURE_COOLDOWN_S` 时自动让位给其他进程。
+
+**二级彻底释放**：仍空闲超过 `QWEN_SHUTDOWN_AFTER_S`（默认 `600` = 10 分钟）则 shutdown 子进程，把 sleep 残留的 CUDA context（两引擎合计约 1.9GB）也归还——空闲时显存回到最低，下次请求走懒加载（11~21s）。
 
 > **注意**：若不用 `QWEN_KV_CACHE_MEMORY_BYTES` 而只靠 utilization，调得过低会导致 vLLM 启动失败（主引擎低于约 0.16、aligner 低于约 0.12 时，扣除权重后无剩余空间分配 KV cache）。
 

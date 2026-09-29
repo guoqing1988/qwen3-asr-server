@@ -363,6 +363,7 @@ Voiceprint enrichment failed; keep diarization labels: CUDA out of memory. Tried
 - `RuntimeRouter` 空闲监控改为调用 `sleep`（不支持 sleep 的引擎回退 `unload`）；`release()` 时刷新 `_last_use`（空闲从「请求结束」而非「请求开始」起算）；
 - **aligner 独立生命周期**：自己的活跃计数与空闲计时，忙时绝不释放。旧实现只在主引擎卸载时跟着 `shutdown`，对齐阶段主引擎一旦空闲就会把正在干活的 aligner 一起关掉；
 - 声纹推理前主动 `release_vllm_gpu()` 让引擎休眠腾显存；
+- 二级 `QWEN_SHUTDOWN_AFTER_S`（秒，默认 **600**，0 禁用）：仍空闲则彻底 `shutdown` 子进程，把 sleep 残留的 CUDA context（两引擎合计约 1.9GB）一并归还；`Qwen3VLLMBackend` 的 `unload()` / router 二级分支负责，aligner 忙时（`aligner_is_busy()`）不连坐
 - `QWEN_ENABLE_SLEEP_MODE=false` 可整体回退旧行为。
 
 ### 踩坑：sleep + multimodal cache = AssertionError
@@ -386,6 +387,7 @@ load=11.0s → before-sleep infer ok → sleep=3.7s（释放 6.45GiB）→ wake=
 ### 效果
 
 休眠态显存 **17GB → 2.8GB**（主进程 1.9GB + 引擎残留 0.95GB）；请求到来 0.2~0.5s 唤醒，基本无感。
+继续空闲超过 `QWEN_SHUTDOWN_AFTER_S`（默认 600s）后二级彻底卸载，把残留 CUDA context 也归还，显存回到仅主进程常驻量。
 
 回归测试：`.venv/bin/python -m pytest tests/test_idle_sleep.py -v`（14 项：空闲 sleep 而非卸载、活跃请求不睡、无 sleep 能力回退卸载、aligner 忙不睡/可单独睡、空闲计时刷新、声纹让路、sleep 与推理互斥与自动唤醒、vLLM 参数组装）。
 
