@@ -78,9 +78,11 @@ Qwen3-ASR 服务（GPU 版）：Confucius4-R2T2（vLLM，默认且唯一 ASR 模
   - `QWEN_MAX_NUM_SEQS`（当前 5）/ `QWEN_MAX_NUM_BATCHED_TOKENS`（当前 2048）/ `QWEN_MAX_MODEL_LEN`（当前 4096）
   - `QWEN_ENFORCE_EAGER`（当前 true，省 CUDA graph 显存）
   - `QWEN_FORCE_ALIGNER_GPU_MEMORY_UTILIZATION`（当前 0.20）/ `QWEN_FORCE_ALIGNER_MAX_MODEL_LEN`（当前 2048）
-  - `QWEN_STREAM_MAX_NEW_TOKENS`（流式单 chunk 生成上限，当前 2048；本项目每轮全量重算而非 KV 增量续写，该值须覆盖整段累积文本，且它是上限而非耗时，调大不影响出字延迟）
-  - `QWEN_STREAM_MAX_NEW_TOKENS_INITIAL`（当前 32）/ `QWEN_STREAM_WARMUP_CHUNKS`（当前 8）：预热期生成上限与预热 chunk 数
-  - **滑动窗口**：`QWEN_STREAM_SEGMENT_MAX_SEC`（当前 12s，单段上限，超时强制落定）、`QWEN_STREAM_SILENCE_SEC`（当前 2s，静音优先落定）、`QWEN_STREAM_OVERLAP_SEC`（当前 1s，段间重叠音频 + 边界去重）——保证每轮解码窗口恒定，适合小时/天级长时实时任务（实测 52.5s 音频滞后从 6.2s 降至 0.1s）
+  - `QWEN_STREAM_CHUNK_SEC`（当前 0.16，官方推荐 80ms~2s）/ `QWEN_STREAM_LOOKAHEAD_SEC`（当前 0.16，首 chunk 额外音频）
+  - `QWEN_STREAM_UNFIXED_CHUNK_NUM`（当前 0）/ `QWEN_STREAM_UNFIXED_TOKEN_NUM`（当前 1）：官方 prefix 策略
+  - `QWEN_STREAM_MAX_NEW_TOKENS`（当前 512，仅作**上限**；实际按 chunk 时长动态取 `(chunk+lookahead)/1280*2`）
+  - **VAD 静音边界**：FireRedVAD `Stream-VAD`（`/data1/models/FireRedVAD/Stream-VAD`，2.3MB）在句尾静音处落定当前段并重建 state；模型/依赖缺失时回退 `QWEN_STREAM_SILENCE_SEC` 能量阈值；`QWEN_STREAM_SEGMENT_MAX_SEC`（当前 60s）作为连续讲话的时长兜底；`QWEN_STREAM_OVERLAP_SEC=0`（官方 append-only 不需要重叠）
+  - **two-pass 定稿**：`QWEN_STREAM_FINAL_PASS=true` 时，段落定用该段音频走离线路径重转（热词生效），修正流式 append-only 无法回改的专名错误
 - **实测显存**（RTX 4090 24GB）：**休眠态**仅主进程约 1.9GB + 引擎残留约 0.95GB ≈ **2.8GB**；**唤醒态** ASR 引擎约 **8.8GB**（权重 3.87 + KV 1.5 + 长音频 encoder buffer）、aligner 约 **6.0GB**（权重 1.73 + KV 1.79）：显式请求词级时间戳时两者合计峰值约 17GB（靠 15s 空闲休眠回落）
 - `gpu_memory_utilization` 有下限：主引擎约 0.16-0.20，对齐器约 0.15（调低会 KV cache 不足启动失败）；已用 `QWEN_KV_CACHE_MEMORY_BYTES` 精确控制 KV cache
 

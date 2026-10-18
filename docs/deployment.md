@@ -134,12 +134,17 @@ cp .env.example .env   # 如不存在则手动创建
 | `QWEN_FORCE_ALIGNER_GPU_MEMORY_UTILIZATION` | `0.20` | 对齐器显存占用比 |
 | `QWEN_FORCE_ALIGNER_MAX_MODEL_LEN` | `2048` | 对齐器上下文长度 |
 | `QWEN_WARMUP_FORCED_ALIGNER` | `false` | 不启动预热对齐器，改为首次词级时间戳请求时懒加载（启动显存 16GB→6GB 的关键） |
-| `QWEN_STREAM_MAX_NEW_TOKENS` | `2048` | 流式单 chunk 生成上限（每轮全量重算，须覆盖整段累积文本；是上限而非耗时） |
-| `QWEN_STREAM_MAX_NEW_TOKENS_INITIAL` | `32` | 预热期单 chunk 生成上限 |
-| `QWEN_STREAM_WARMUP_CHUNKS` | `8` | 流式预热 chunk 数 |
-| `QWEN_STREAM_SEGMENT_MAX_SEC` | `12` | 滑动窗口：单段最大时长（秒），超时强制落定并开新段 |
-| `QWEN_STREAM_SILENCE_SEC` | `2.0` | 静音切段阈值（秒） |
-| `QWEN_STREAM_OVERLAP_SEC` | `1.0` | 段间重叠音频（秒），减弱强制切段处丢词 |
+| `QWEN_STREAM_CHUNK_SEC` | `0.16` | 流式解码粒度（官方推荐的 80ms~2s 范围） |
+| `QWEN_STREAM_LOOKAHEAD_SEC` | `0.16` | 首个 chunk 额外音频，帮助首段判断语言/专名 |
+| `QWEN_STREAM_UNFIXED_CHUNK_NUM` | `0` | 前 N 个 chunk 不接历史 prefix |
+| `QWEN_STREAM_UNFIXED_TOKEN_NUM` | `1` | prefix 回滚 token 数（官方默认 1） |
+| `QWEN_STREAM_MAX_NEW_TOKENS` | `512` | 生成**上限**；实际按 chunk 时长动态取小值，0 表示不设上限 |
+| `QWEN_STREAM_SEGMENT_MAX_SEC` | `60` | 单段最大时长兜底（主边界是 VAD 静音） |
+| `QWEN_STREAM_SILENCE_SEC` | `2.0` | VAD 不可用时的能量阈值回退 |
+| `QWEN_STREAM_OVERLAP_SEC` | `0` | 段间重叠音频；官方 append-only 不需要 |
+| `QWEN_STREAM_VAD_MODEL_PATH` | `/data1/models/FireRedVAD/Stream-VAD` | 流式 VAD 模型目录（不存在则回退能量阈值） |
+| `QWEN_STREAM_VAD_MIN_SILENCE_FRAMES` | `20` | 句尾静音帧数（10ms/帧，20 = 200ms） |
+| `QWEN_STREAM_FINAL_PASS` | `true` | 段定稿时用离线路径重转（two-pass，保证热词/专名） |
 | `QWEN_IDLE_UNLOAD_TIMEOUT` | `15` | 一级释放：空闲休眠超时（秒），0 禁用；`15` = 15 秒无请求即 sleep（权重 offload 到 CPU，唤醒 <1s） |
 | `QWEN_SHUTDOWN_AFTER_S` | `600` | 二级释放：仍空闲超过该秒数则彻底 shutdown 子进程（连 sleep 残留的 CUDA context 一起归还），0 禁用；代价是下次请求重载 11~21s |
 | `QWEN_ENABLE_SLEEP_MODE` | `true` | 启用 vLLM sleep mode（进程常驻、只归还显存）；`false` 回退为销毁子进程（重载 11~21s） |
@@ -501,12 +506,27 @@ ASR 转写结果中匹配到的 `speaker_id` 会自动替换为注册名；未�
 
 | 环境变量 | 默认值 | 说明 |
 |----------|--------|------|
-| `ASR_DEFAULT_HOTWORDS` | （空） | 服务端预设热词（英文逗号分隔），与请求热词（OpenAI `prompt` / 原生 `vocabulary_id`）合并后注入识别上下文；建议 ≤512 字符 |
+| `ASR_DEFAULT_HOTWORDS` | （空） | 服务端预设热词（英文逗号分隔），与请求热词（OpenAI `prompt` / 原生 `vocabulary_id` / 流式 WebSocket `context`）合并后注入识别上下文；建议 ≤512 字符 |
 
 热词用**英文逗号**分隔（如 `阿里巴巴,OpenAI,Bank of China`），短语内部空格保留
 （`Bank of China` 整体作为一个热词）。热词为"倾向性采纳"而非强制替换，建议只收录
-高频关键术语（公司名、行业专有名词、英文缩写等），过长列表会稀释效果。修改 `.env`
-后重启服务即生效（`start.py` 每次启动都会执行 `load_dotenv()` 重读 `.env`）。
+高频关键术语（公司名、行业专有名词、英文缩写等）。修改 `.env` 后重启服务即生效
+（`start.py` 每次启动都会执行 `load_dotenv()` 重读 `.env`）。
+
+**注入方式（2026-10-18 对齐官方）**：热词现在按 Confucius4-R2T2 官方约定
+**直接作为 system prompt 原文**，不再包一层 "Transcribe the speech... / Use this
+context..." 指令；强制语言时在生成提示后追加 `language X<asr_text>`。实测同样
+40s 英文音频 + 热词 `GPT, transcription`：旧写法输出全部 `gbt`（热词无效），
+官方写法输出 `gpt`（热词生效）。
+
+**合并规则**：离线（`/v1/audio/transcriptions` 的 `prompt`、`/stream/v1/asr` 的
+`vocabulary_id`）与流式（`/ws/v1/asr/qwen` 的 `context`）都按
+`merge_hotwords(ASR_DEFAULT_HOTWORDS, 请求热词)` 合并：默认词在前、去重、保留短语内空格。
+
+**流式热词限制**：流式为 append-only，首段一旦输出错误（如 `gbt`）后续不会改写。
+`QWEN_STREAM_FINAL_PASS=true` 会在段定稿时用离线路径对该段音频重转，可校正
+后续段的专名；首段若音频本身不清晰则无法完全修复，建议对热词要求高的场景
+使用离线接口或保留 two-pass。
 
 **稀释与加权（实测经验，2026-08-13）：**
 - 列表过长会稀释单个热词的偏向权重：实测 40+ 词列表中的 `Dazed` 被识别成"电视"，

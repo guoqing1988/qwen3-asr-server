@@ -258,7 +258,7 @@ sudo systemctl daemon-reload
    修复：prefix 改为**已定稿历史**（完整 `raw_decoded` 去掉末尾 `unfixed_token_num` 个 token），抽出 `_build_stream_prefix()` 便于测试。
 
 2. **`max_new_tokens` 太小**：曾按「官方实时推荐 2」配置 `QWEN_STREAM_MAX_NEW_TOKENS=2`。本项目每轮全量重算，该值是「整段累积文本的生成上限」，给 2 连 `language X<asr_text>` 前缀都吐不完。
-   修复：默认改 `512`（**上限而非耗时**，遇 EOS 即停，不影响出字延迟），另加预热期参数 `QWEN_STREAM_MAX_NEW_TOKENS_INITIAL=32` / `QWEN_STREAM_WARMUP_CHUNKS=8`。
+   修复（2026-10-18 已演进）：默认 `512` 仅作**上限**，实际生成量按 chunk 时长动态计算；旧的 `QWEN_STREAM_MAX_NEW_TOKENS_INITIAL` / `QWEN_STREAM_WARMUP_CHUNKS` 预热补丁已移除。
 
 3. **解析残留**：流式 prefix 用 `skip_special_tokens=False` 解码（必须保留 `<asr_text>` 以免解析失败），会带出 `|` 等标记字符；音频不足时模型还会把语言预测成字面量 `None`。
    修复：`_parse_asr_output()` 清理 `|` 并将 `None/null` 视为无效，回退到请求指定语言。
@@ -273,16 +273,17 @@ sudo systemctl daemon-reload
 
 **根因**：每轮 `generate(prompt + prefix, audio=全部累积音频)` 是**全量重算**，prefill 开销随段内音频线性增长。原实现虽有分段机制，但单段上限硬编码 60s（`MAX_BUFFER=960000`）、静音阈值 2s（`SILENCE_THRESHOLD=32000`）——连续语音无静音时单段一直涨到 60s，窗口内后期严重落后，也不适合小时/天级实时任务。
 
-**改造（滑动窗口 + 段间重叠去重）**：
+**改造（2026-10-18 已改为官方 R2T2 用法 + FireRedVAD，见 `docs/superpowers/plans/2026-10-18-r2t2-native-usage.md`）**：
 
-- `QWEN_STREAM_SEGMENT_MAX_SEC`（默认 12s）：单段上限，超时强制落定并开新段 → 每轮解码窗口恒定，不随会话时长增长
-- `QWEN_STREAM_SILENCE_SEC`（默认 2s）：静音优先落定（自然句边界）
-- `QWEN_STREAM_OVERLAP_SEC`（默认 1s）：新段开头预置上一段尾部音频，减少强制切段处丢词；识别结果按字符级后缀/前缀匹配去重，**大小写不敏感**（重叠音频处模型可能重排大小写，如 `Really` vs `really`，敏感匹配会漏去重）
-- 硬编码的 `MAX_BUFFER` / `SILENCE_THRESHOLD` 类常量移除，全部走 `.env`
+- `QWEN_STREAM_CHUNK_SEC`（默认 0.16s）：官方推荐解码粒度
+- FireRedVAD `Stream-VAD`：自然句尾静音落定（`QWEN_STREAM_VAD_MIN_SILENCE_FRAMES=50`，即 500ms）
+- `QWEN_STREAM_SEGMENT_MAX_SEC`（默认 60s）：无静音连续讲话的兜底切段
+- 移除段间 overlap 与字符去重（官方 append-only 不会重复；去重反而可能误删）
+- `QWEN_STREAM_FINAL_PASS=true`：段定稿时用离线路径重转，修正专名/热词
 
-**效果**：52.5s 音频滞后 **6.2s → 0.1s**，分 5 段，段边界重复文本被正确去除，`FULL` 文本连贯（如段边界 `really hard work` + `Really hard work getting...` → `getting our technology...`）。
+**历史效果**：旧「12s 强制切段 + 1s overlap + 字符去重」方案曾把 52.5s 音频的滞后从 6.2s 降到 0.1s；新方案在保持低延迟的同时消除了静音误切与段边界丢词。
 
-**回归测试**：`.venv/bin/python -m pytest tests/test_qwen3_stream_window.py -v`（`_strip_overlap` 中英文/大小写/边界，`_need_truncate` 阈值，`_extract_segment_tail` 尾部切片）。
+**回归测试**：`.venv/bin/python -m pytest tests/test_qwen3_stream_window.py -v`（流式默认参数、动态 `max_new_tokens`、prefix 回滚、标点/中文空格归一、VAD 段落定与 two-pass）。
 
 **残余限制**：单段内仍是全量重算，所以窗口大小直接决定单轮成本；若要进一步降延迟，需改用 vLLM 异步引擎做 KV 增量续写（大改造）。
 

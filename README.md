@@ -402,11 +402,12 @@ curl -X POST "http://localhost:9101/stream/v1/asr?enable_speaker_diarization=tru
      "format": "pcm",              // "pcm" 或 "wav"
      "sample_rate": 16000,
      "language": "zh",             // 可选，自动检测
-     "context": "",                // 热词上下文
+     "context": "",                // 热词上下文（与 ASR_DEFAULT_HOTWORDS 合并）
      "enable_inverse_text_normalization": true,
-     "chunk_size_sec": 2.0,
-     "unfixed_chunk_num": 2,
-     "unfixed_token_num": 5
+     "chunk_size_sec": 0.16,      // 解码粒度（官方推荐 160ms）
+     "lookahead_sec": 0.16,       // 首 chunk 额外音频
+     "unfixed_chunk_num": 0,
+     "unfixed_token_num": 1
    }}
    ```
 2. 服务器回 `started`（带生效参数）
@@ -446,25 +447,29 @@ asyncio.run(main())
 `format`、`sample_rate`、`enable_intermediate_result`、`enable_punctuation`、
 `enable_itn` 等参数。
 
-**实时行为**（Qwen3 路径）：真正的实时识别。每个音频 chunk（默认 2 秒）
+**实时行为**（Qwen3 路径）：真正的实时识别。每个音频 chunk（默认 160ms）
 增量解码后立即推送 `type: "result"`（`is_partial: true`），客户端可渲染
-实时字幕；一句话结束（静音 3 秒或单段上限）时推送 `segment_end` 确认文本。
+实时字幕；FireRedVAD 检测到句尾静音（或单段达到 `QWEN_STREAM_SEGMENT_MAX_SEC`
+兜底）时推送 `segment_end` 确认文本。段间无重叠、无字符去重，文本自然拼接。
 延迟调优：
 
 | 参数 | 默认 | 作用 |
 |------|------|------|
-| `chunk_size_sec` | 2.0 | 出字延迟；调小（如 1.0）更实时 |
-| `unfixed_token_num` | 5 | 句尾回滚修正 token 数 |
-| `unfixed_chunk_num` | 2 | 允许截断前的预热 chunk 数 |
-| `max_new_tokens` | 2048 | 单 chunk 生成上限（服务端默认，可用环境变量覆盖） |
-| `max_new_tokens_initial` | 32 | 预热期单 chunk 生成上限 |
-| `warmup_chunks` | 8 | 预热 chunk 数（前 N 个 chunk 用 initial 值） |
+| `chunk_size_sec` | 0.16 | 解码粒度/出字延迟，官方推荐 160ms（80ms~2s） |
+| `lookahead_sec` | 0.16 | 首 chunk 额外音频，帮助首段判断语言/专名 |
+| `unfixed_token_num` | 1 | 句尾回滚修正 token 数（官方默认 1） |
+| `unfixed_chunk_num` | 0 | 前 N 个 chunk 不接历史 prefix（官方默认 0） |
+| `max_new_tokens` | 512 | 生成**上限**，实际按 chunk 时长动态取小值；0 表示不设上限 |
 
-> **`max_new_tokens` 说明（Confucius4 实测）**：本项目 vLLM 流式每轮都对
-> **累积音频**做全量重算（不是官方的 KV 增量续写），因此该值是「整段累积文本的
-> 生成上限」，必须足够大；给 `2` 会让文本逐轮被截断、退化成标点。它是**上限而非
-> 耗时**（模型遇 EOS 即停），调大不影响出字延迟——低延迟靠 `chunk_size_sec`。
-> 服务端默认值可用 `.env` 的 `QWEN_STREAM_*` 调整。
+> **`max_new_tokens` 说明**：采用官方 R2T2 算法，每轮生成量约为
+> `(chunk + lookahead) / 1280 * 2`（160ms chunk 约 8 个 token），
+> 配置值仅作硬上限，不再是「整段文本上限」。低延迟靠 `chunk_size_sec` 与
+> 动态上限共同保证。
+>
+> **热词/上下文**：`context` 现在按官方约定直接作为 system prompt（不再包
+> "Transcribe the speech..." 指令），离线与流式共用；流式为 append-only，
+> 首段已输出文本无法回改，段定稿时可用 `QWEN_STREAM_FINAL_PASS=true`
+> 走离线路径重转校正专名。
 
 **流式限制**：
 - 两条路径都不返回词级时间戳
@@ -659,17 +664,22 @@ curl -X DELETE 'http://localhost:9101/api/v1/voiceprint-speakers/{speaker_id}'
 | `QWEN_FORCE_ALIGNER_MAX_MODEL_LEN` | - | forced aligner 的 `max_model_len`（本项目设 `2048`） |
 | `QWEN_FORCED_ALIGNER_ENABLED` | `true` | 是否启用 forced aligner（`false` 则词级时间戳不可用） |
 | `QWEN_WARMUP_FORCED_ALIGNER` | `false` | 是否在启动时预热 aligner。`false` 时改为首次 `word_timestamps=true` 请求才懒加载（启动显存 16GB → 6GB 的关键） |
-| `QWEN_STREAM_MAX_NEW_TOKENS` | `2048` | 流式单 chunk 生成上限。本项目每轮全量重算（非 KV 增量续写），该值须能覆盖整段累积文本，太小会把文本截断；**max_tokens 是上限而非耗时**（遇 EOS 即停），调大不影响出字延迟 |
-| `QWEN_STREAM_MAX_NEW_TOKENS_INITIAL` | `32` | 预热期（前 `QWEN_STREAM_WARMUP_CHUNKS` 个 chunk）的生成上限 |
-| `QWEN_STREAM_WARMUP_CHUNKS` | `8` | 流式预热 chunk 数 |
-| `QWEN_STREAM_SEGMENT_MAX_SEC` | `12` | **滑动窗口**：单段最大时长（秒）。超时即落定当前段并开新段，保证每轮解码窗口恒定、不随会话时长增长（适合小时/天级长时任务） |
-| `QWEN_STREAM_SILENCE_SEC` | `2.0` | 静音切段阈值（秒）：累计静音超过即落定（自然句边界优先） |
-| `QWEN_STREAM_OVERLAP_SEC` | `1.0` | 段间重叠音频（秒）：新段开头预置上一段尾部音频，减弱强制切段处丢词；识别结果做边界去重（大小写不敏感） |
+| `QWEN_STREAM_CHUNK_SEC` | `0.16` | 流式解码粒度（秒），官方 R2T2 推荐 80ms~2s；决定出字延迟 |
+| `QWEN_STREAM_LOOKAHEAD_SEC` | `0.16` | 首个 chunk 额外音频（秒），帮助首段判断语言/专名 |
+| `QWEN_STREAM_UNFIXED_CHUNK_NUM` | `0` | 前 N 个 chunk 不接历史 prefix（官方默认 0） |
+| `QWEN_STREAM_UNFIXED_TOKEN_NUM` | `1` | prefix 回滚 token 数（官方默认 1） |
+| `QWEN_STREAM_MAX_NEW_TOKENS` | `512` | 单 chunk 生成**上限**；实际按 chunk 时长动态取小值（约 `(chunk+lookahead)/1280*2`），`0` 表示不设上限 |
+| `QWEN_STREAM_SEGMENT_MAX_SEC` | `60` | 单段最大时长（秒），连续讲话无静音时的兜底切段 |
+| `QWEN_STREAM_SILENCE_SEC` | `2.0` | VAD 不可用时回退的能量阈值静音切段（秒） |
+| `QWEN_STREAM_OVERLAP_SEC` | `0` | 段间重叠音频（秒）；官方 append-only 不需要，保留仅为兼容 |
+| `QWEN_STREAM_VAD_MODEL_PATH` | `/data1/models/FireRedVAD/Stream-VAD` | FireRedVAD 流式 VAD 模型目录；缺失时回退能量阈值 |
+| `QWEN_STREAM_VAD_MIN_SILENCE_FRAMES` | `50` | 句尾静音帧数（10ms/帧，50 = 500ms）；越小断句越碎 |
+| `QWEN_STREAM_FINAL_PASS` | `true` | 段定稿时用离线路径重转（two-pass），修正流式无法回改的热词/专名 |
 | `QWEN_IDLE_UNLOAD_TIMEOUT` | `15` | 一级释放：无请求超过该秒数后让 vLLM 引擎休眠（sleep：权重 offload 到 CPU、进程常驻，唤醒 <1s）；`0` 禁用（本项目设 `15` = 15 秒） |
 | `QWEN_SHUTDOWN_AFTER_S` | `600` | 二级释放：仍空闲超过该秒数则彻底 shutdown 子进程（连 sleep 残留的 CUDA context 一起归还）；`0` 禁用；代价是下次请求重载 11~21s |
 | `QWEN_LOW_VRAM_THRESHOLD_GB` | `6.0` | 可用显存低于该值且引擎空闲时触发显存压力休眠 |
 | `QWEN_VRAM_PRESSURE_COOLDOWN_S` | `60` | 显存压力休眠所需的引擎空闲秒数 |
-| `ASR_DEFAULT_HOTWORDS` | （空） | 服务端预设热词（英文逗号分隔，建议 ≤512 字符），与请求热词（OpenAI `prompt` / 原生 `vocabulary_id`）合并后注入识别上下文；热词为倾向性采纳而非强制替换 |
+| `ASR_DEFAULT_HOTWORDS` | （空） | 服务端预设热词（英文逗号分隔，建议 ≤512 字符），与请求热词（OpenAI `prompt` / 原生 `vocabulary_id` / 流式 `context`）合并后注入识别上下文；热词为倾向性采纳而非强制替换 |
 | `VOICEPRINT_ENABLED` | `true` | 是否启用 ASR 结果声纹身份匹配 |
 | `VOICEPRINT_DB_PATH` | `./data/voiceprints.sqlite3` | SQLite + sqlite-vec 声纹数据库路径 |
 | `VOICEPRINT_MATCH_THRESHOLD` | `0.70` | 说话人身份匹配阈值 |
