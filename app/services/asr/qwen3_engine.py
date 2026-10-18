@@ -419,6 +419,8 @@ class Qwen3ASREngine(BaseASREngine):
             forced_aligner_path=forced_aligner_path,
             forced_aligner_gpu_memory_utilization=self._forced_aligner_gpu_memory_utilization_config,
             forced_aligner_max_model_len=settings.QWEN_FORCE_ALIGNER_MAX_MODEL_LEN,
+            tokenizer_path=settings.QWEN_LLAMACPP_TOKENIZER_PATH,
+            stream_mode=settings.QWEN_LLAMACPP_STREAM_MODE,
         )
 
     def _load_vllm(

@@ -338,6 +338,10 @@ QWEN_LLAMACPP_MMPROJ_PATH=/data1/models/Confucius4-R2T2-GGUF/mmproj-Confucius4-R
 QWEN_LLAMACPP_SERVER_BIN=/data1/www/llama.cpp/build/bin/llama-server
 QWEN_LLAMACPP_PORT=18090
 QWEN_LLAMACPP_CTX=8192
+# 流式协议的 tokenizer（append 模式做 token 级回滚用）
+QWEN_LLAMACPP_TOKENIZER_PATH=/data1/models/Confucius4-R2T2
+# append（默认，已发布文本不回撤）/ redecode（每秒全量重解码，兼容旧行为）
+QWEN_LLAMACPP_STREAM_MODE=append
 ```
 
 `sudo systemctl restart qwen3-asr` 生效。服务首次识别请求时自动启动 `llama-server`（约 2~4s），之后常驻；`unload()` 会终止该子进程。
@@ -345,7 +349,13 @@ QWEN_LLAMACPP_CTX=8192
 **行为说明**：
 
 - llama.cpp 单次音频编码上限约 60s，后端内部按 `QWEN_LLAMACPP_MAX_SEGMENT_SEC`（默认 25s）切段后拼接文本；
-- 流式改为**每 1s 用累积音频全量重解码**（首轮 0.32s）：llama-server 的 append-only prefix 续写在短音频上不稳定，全量重解码保证文本不倒退，20s 音频每轮约 0.3s；
+- 流式默认 **append-only（`QWEN_LLAMACPP_STREAM_MODE=append`）**，移植 T8 官方协议：
+  - 每 0.16s 一个 chunk（首轮额外 0.16s lookahead），用 assistant prefix 续写，`max_tokens` 仅 2（首轮 4），不再整段重解码；
+  - prefix = `language X<asr_text>` 标签 + **正文回滚 1 个 token**（`unfixed_token_num=1`），标签单独维护，避免回滚破坏 `<asr_text>` 特殊 token；
+  - 已发布文本（`stable`）永远**落后候选 1 token**；候选若不再以已发布文本开头（回撤）则整轮丢弃，保证 partial 只增不减；
+  - 首轮若仍是纯静音（RMS < 0.01）则继续累积（上限 6s）再解码，避免静音幻觉被固化；
+  - 实测（`/home/ubuntu/realtime_10min.wav`，VAD 100 帧）：3 分 44 秒 → 16 段、158 个 partial、**0 次回撤**，每帧约 200ms（段内 <30s 时约 100ms）；
+  - `QWEN_LLAMACPP_STREAM_MODE=redecode` 可回退为「每 1s 用累积音频全量重解码」（旧行为，会跨轮重判/可能回撤）；
 - 流式段内有效语音不足 0.8s 时不落定（合并到下一段），避免开头长静音导致极短段被误识别；
 - 词级时间戳的 aligner `gpu_memory_utilization` 保底 **0.35**（Q8 主模型常驻约 4GB，沿用 vLLM 的 0.2 会因 KV cache 不足白等约 90s）；仍不足时自动 +0.1 / +0.2 重试。
 

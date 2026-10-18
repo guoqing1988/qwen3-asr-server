@@ -134,6 +134,10 @@ class Settings:
     QWEN_LLAMACPP_GPU_LAYERS: int = 99
     # 单次送入 llama.cpp 的最大音频时长（实测单次上限约 60s，取 25s 留余量）
     QWEN_LLAMACPP_MAX_SEGMENT_SEC: float = 25.0
+    # 流式解码模式：append=token 级 append-only（默认，已发布文本不回撤）；redecode=每秒全量重解码
+    QWEN_LLAMACPP_STREAM_MODE: str = "append"
+    # 流式 token 回滚用的 tokenizer（默认复用 HF 原模型目录）
+    QWEN_LLAMACPP_TOKENIZER_PATH: str = "/data1/models/Confucius4-R2T2"
     # 流式识别：单 chunk 生成上限（配置值作为硬上限，实际按 chunk 时长动态取小值）
     QWEN_STREAM_MAX_NEW_TOKENS: int = 512
     # 流式识别：解码粒度（秒）。官方 R2T2 推荐 0.16（80ms~2s 可调）
@@ -355,6 +359,12 @@ class Settings:
         )
         self.QWEN_LLAMACPP_GPU_LAYERS = int(
             os.getenv("QWEN_LLAMACPP_GPU_LAYERS", str(self.QWEN_LLAMACPP_GPU_LAYERS))
+        )
+        self.QWEN_LLAMACPP_STREAM_MODE = os.getenv(
+            "QWEN_LLAMACPP_STREAM_MODE", self.QWEN_LLAMACPP_STREAM_MODE
+        )
+        self.QWEN_LLAMACPP_TOKENIZER_PATH = os.getenv(
+            "QWEN_LLAMACPP_TOKENIZER_PATH", self.QWEN_LLAMACPP_TOKENIZER_PATH
         )
         self.QWEN_LLAMACPP_MAX_SEGMENT_SEC = float(
             os.getenv(

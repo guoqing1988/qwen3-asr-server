@@ -96,10 +96,11 @@
 1. `Qwen3ASREngine.supports_realtime` 未包含 `llamacpp`，WebSocket 连接被拒绝 → 已加入。
 2. 音频开头长静音时 FireRedVAD 立即报句尾，产生 <1s 的极短段并被误识别（`ttranscribe and gbt`）→ 现在段内有效语音 ≥0.8s 才落定，vLLM 路径同样受益。
 3. Q8 aligner 沿用 vLLM 的 `gpu_memory_utilization=0.2` 会因 KV cache 不足空等约 90s → 保底 0.35。
-4. 流式 append-only prefix 在 llama.cpp 上不稳定（英文单词被字符级回滚切断）→ 改为每 1s 全量重解码。
+4. 流式 append-only prefix 在 llama.cpp 上不稳定（英文单词被字符级回滚切断）→ 先临时改为每 1s 全量重解码。
+5. 全量重解码导致 partial 文本回撤（用户实测 `写了一个信息的媒` → `又写了一个信息…`）→ 移植 T8 `StreamingSession` 协议改为 **token 级 append-only**（`QWEN_LLAMACPP_STREAM_MODE=append`）：标签独立维护 + 正文回滚 1 token + `stable` 落后候选 1 token + 回撤候选整轮丢弃 + 首轮静音继续累积（≤6s）。实测 3m44s/16 段/158 partial/0 回撤，每帧约 200ms；tokenizer 用 `QWEN_LLAMACPP_TOKENIZER_PATH`（HF 原目录）。
 
 ### 已知差异
 
 - Q8 质量略低于 bf16（示例音频出现 `tendbreak`、`fifty seven`），热词与专名仍生效；
-- 流式为 1s 粒度（非 vLLM 的 160ms 增量），整段文本替换，前端已按 `current_segment_text` 全量刷新，兼容；
+- 流式默认 append-only（160ms chunk、token 级续写、partial 只增不减），`redecode` 模式可回退为 1s 全量重解码；
 - `word_timestamps=true` 时 aligner 与 llama-server 同卡，峰值约 11GB，靠对齐后 sleep 回落。

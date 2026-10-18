@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """Unit tests for the llama.cpp Q8 backend (no server / GPU required)."""
 
+import threading
+
 import numpy as np
 import pytest
 
@@ -22,6 +24,11 @@ def _make_backend(monkeypatch) -> LlamaCppQ8Backend:
     )
     backend = object.__new__(LlamaCppQ8Backend)
     backend._max_segment_sec = 25.0
+    backend._model_path = "/nonexistent"
+    backend._tokenizer = None
+    backend._tokenizer_path = None
+    backend._tokenizer_lock = threading.RLock()
+    backend._stream_mode = "append"
     return backend
 
 
@@ -106,39 +113,99 @@ class TestTranscribeAudio:
         assert text == "gpt"
 
 
+class _CharTokenizer:
+    """字符级 tokenizer 桩：回滚 1 个 token == 回滚 1 个字符。"""
+
+    def encode(self, text, add_special_tokens=False):
+        return list(text)
+
+    def decode(self, ids, skip_special_tokens=False):
+        return "".join(ids)
+
+
+def _append_backend(monkeypatch, replies) -> LlamaCppQ8Backend:
+    backend = _make_backend(monkeypatch)
+    stub = _CharTokenizer()
+    monkeypatch.setattr(backend, "_get_tokenizer", lambda: stub)
+    texts = iter(replies)
+    monkeypatch.setattr(
+        backend,
+        "_chat",
+        lambda audio, context="", prefix="", max_tokens=0: next(texts),
+    )
+    return backend
+
+
 class TestStreaming:
-    def test_feed_stream_redecodes_at_interval(self, monkeypatch):
+    def test_feed_stream_append_only_keeps_stable_prefix(self, monkeypatch):
+        backend = _append_backend(
+            monkeypatch,
+            [
+                "language Chinese<asr_text>你好",
+                "language Chinese<asr_text>你好世界",
+                "language Chinese<asr_text>你错了",  # 回撤已发布文本 → 丢弃
+            ],
+        )
+        state = backend.init_streaming_state(chunk_size_sec=0.16, lookahead_sec=0.0)
+        speech = np.full(2560, 0.1, dtype=np.float32)
+        state = backend.feed_stream(speech, state)
+        # 已发布文本落后候选 1 token（T8 stable 语义）
+        assert state.text == "你"
+        assert state.body == "你好"
+        assert state.detected_language == "Chinese"
+        state = backend.feed_stream(speech, state)
+        assert state.text == "你好世"
+        state = backend.feed_stream(speech, state)
+        # 回撤候选被丢弃，已发布文本不变
+        assert state.text == "你好世"
+
+    def test_feed_stream_skips_leading_silence(self, monkeypatch):
+        backend = _append_backend(monkeypatch, ["language Chinese<asr_text>你好"])
+        state = backend.init_streaming_state(chunk_size_sec=0.16, lookahead_sec=0.16)
+        calls: list[int] = []
+        monkeypatch.setattr(
+            backend,
+            "_chat",
+            lambda audio, context="", prefix="", max_tokens=0: (
+                calls.append(len(audio)) or "language Chinese<asr_text>你好"
+            ),
+        )
+        # 0.32s 静音 → 继续累积，不解码
+        state = backend.feed_stream(np.zeros(5120, dtype=np.float32), state)
+        assert calls == []
+        # 补入有语音的音频 → 解码
+        state = backend.feed_stream(np.full(2560, 0.1, dtype=np.float32), state)
+        assert calls and state.text
+
+    def test_finish_stream_final_decodes_with_prefix(self, monkeypatch):
+        backend = _append_backend(monkeypatch, ["language Chinese<asr_text>完整句子。"])
+        state = backend.init_streaming_state(chunk_size_sec=0.16, lookahead_sec=0.0)
+        state.buffer = np.full(1600, 0.1, dtype=np.float32)
+        state = backend.finish_stream(state)
+        assert state.text == "完整句子。"
+        assert len(state.audio) == 1600
+        assert len(state.buffer) == 0
+
+    def test_redecode_mode_still_supported(self, monkeypatch):
         backend = _make_backend(monkeypatch)
+        backend._stream_mode = "redecode"
         texts = iter(["你好", "你好世界"])
         calls: list[int] = []
-
-        def fake_transcribe(audio, **kwargs):
-            calls.append(len(audio))
-            return next(texts)
-
-        monkeypatch.setattr(backend, "_transcribe_audio", fake_transcribe)
+        monkeypatch.setattr(
+            backend,
+            "_transcribe_audio",
+            lambda audio, **kwargs: (calls.append(len(audio)) or next(texts)),
+        )
         state = backend.init_streaming_state(chunk_size_sec=0.16, lookahead_sec=0.16)
-        # 首轮阈值 0.32s：0.2s 不解码，0.4s 解码
         state = backend.feed_stream(np.zeros(3200, dtype=np.float32), state)
         assert calls == []
         state = backend.feed_stream(np.zeros(3200, dtype=np.float32), state)
         assert calls == [6400]
         assert state.text == "你好"
-        # 之后每 1s 解码一次
         for _ in range(5):
             state = backend.feed_stream(np.zeros(3200, dtype=np.float32), state)
         assert len(calls) == 2
         assert state.text == "你好世界"
-
-    def test_finish_stream_decodes_full_audio(self, monkeypatch):
-        backend = _make_backend(monkeypatch)
-        backend._chat = lambda *a, **k: "language Chinese<asr_text>完整句子。"
-        state = backend.init_streaming_state(chunk_size_sec=0.16, lookahead_sec=0.0)
-        state.buffer = np.zeros(1600, dtype=np.float32)
-        state = backend.finish_stream(state)
-        assert state.text == "完整句子。"
-        assert len(state.audio) == 1600
-        assert len(state.buffer) == 0
 
 
 class TestBackendSelection:

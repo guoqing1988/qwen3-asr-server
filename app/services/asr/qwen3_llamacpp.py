@@ -103,6 +103,33 @@ def _parse_output(raw: str, forced_language: str | None) -> tuple[str, str]:
     return forced_language or "", text.strip("|").strip()
 
 
+def _rms(audio: np.ndarray) -> float:
+    if not len(audio):
+        return 0.0
+    return float(np.sqrt(np.mean(np.square(audio, dtype=np.float64))))
+
+
+def _split_tag(raw: str, forced_language: str | None = None) -> tuple[str, str]:
+    """Always strip the `language X<asr_text>` tag (append-only protocol).
+
+    与 ``_parse_output`` 不同：无标签时不再把整段当正文（避免标签被固化进
+    已发布文本），与 T8 ``parse_raw`` 行为一致。
+    """
+    raw = (raw or "").split("|", 1)[0].replace("\ufffd", "")
+    if "<asr_text>" in raw:
+        meta, text = raw.split("<asr_text>", 1)
+        language = ""
+        for line in meta.splitlines():
+            value = line.strip()
+            if value.lower().startswith("language "):
+                language = value[len("language ") :].strip()
+                break
+        if language.lower() in {"none", "null"}:
+            language = ""
+        return forced_language or language, text
+    return forced_language or "", raw
+
+
 @dataclass
 class Q8StreamingState:
     """Append-only streaming state, mirroring ``VLLMRealtimeState`` fields used by the engine."""
@@ -117,10 +144,12 @@ class Q8StreamingState:
     buffer: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.float32))
     audio: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.float32))
     raw: str = ""
+    body: str = ""
     text: str = ""
     preview: str = ""
     detected_language: str = ""
     chunk_id: int = 0
+    first: bool = True
 
 
 class LlamaCppQ8Backend:
@@ -140,6 +169,8 @@ class LlamaCppQ8Backend:
         forced_aligner_path: str | None = None,
         forced_aligner_gpu_memory_utilization: float | None = None,
         forced_aligner_max_model_len: int | None = None,
+        tokenizer_path: str | None = None,
+        stream_mode: str = "append",
         request_timeout: float = 600.0,
     ) -> None:
         for path in (model_path, mmproj_path, server_bin):
@@ -154,6 +185,10 @@ class LlamaCppQ8Backend:
         self._configured_port = int(port)
         self._max_segment_sec = float(max_segment_sec)
         self._request_timeout = float(request_timeout)
+        self._tokenizer_path = tokenizer_path
+        self._stream_mode = (stream_mode or "append").strip().lower()
+        self._tokenizer: Any | None = None
+        self._tokenizer_lock = threading.RLock()
 
         self._forced_aligner_path = forced_aligner_path
         self._aligner_gpu_util = forced_aligner_gpu_memory_utilization
@@ -693,15 +728,126 @@ class LlamaCppQ8Backend:
             ),
         )
 
-    # 流式重解码间隔（秒）。llama-server 每轮做全量 prefill + 生成，
-    # 20s 音频约 0.3s；用 1s 间隔在 160ms 帧预算内保持实时，且避免
-    # append-only prefix 在 llama.cpp 上不稳定导致的文本回退。
+    # 首轮最长等待静音时长（秒）；超过后按现有音频解码
+    _FIRST_SILENCE_MAX_SEC = 6.0
+    # redecode 兼容模式的重解码间隔（秒）
     _STREAM_DECODE_INTERVAL_SEC = 1.0
+
+    def _get_tokenizer(self) -> Any:
+        """懒加载 tokenizer（仅 append-only 流式需要做 token 级回滚）。"""
+        if self._tokenizer is not None:
+            return self._tokenizer
+        with self._tokenizer_lock:
+            if self._tokenizer is None:
+                from transformers import AutoTokenizer
+
+                path = self._tokenizer_path or self._model_path
+                try:
+                    self._tokenizer = AutoTokenizer.from_pretrained(path)
+                except Exception as exc:  # noqa: BLE001
+                    raise RuntimeError(
+                        f"流式解码需要 tokenizer，但加载 {path} 失败: {exc}"
+                    ) from exc
+            return self._tokenizer
+
+    def _rollback_tokens(self, text: str) -> str:
+        """按 token 回滚 1 个 token，作为 append-only prefix（T8 unfixed_tokens=1）。"""
+        if not text:
+            return ""
+        tokenizer = self._get_tokenizer()
+        ids = tokenizer.encode(text, add_special_tokens=False)
+        keep = max(0, len(ids) - 1)
+        while keep >= 0:
+            value = (
+                tokenizer.decode(ids[:keep], skip_special_tokens=False) if keep else ""
+            )
+            if "\ufffd" not in value:
+                return value
+            keep -= 1
+        return ""
+
+    def _decode_stream_append(
+        self, state: Q8StreamingState, *, final: bool = False
+    ) -> Q8StreamingState:
+        """T8 协议：prefix 续写 + 已发布文本只增不减（stable 落后候选 1 token）。"""
+        language = state.force_language or state.detected_language or ""
+        tag = f"language {language}<asr_text>" if language else ""
+        if final:
+            prefix = tag + state.body
+            max_tokens = max(64, int(state.max_new_tokens or 512))
+        else:
+            prefix = (tag + self._rollback_tokens(state.body)) if state.body else ""
+            max_tokens = 4 if state.first else 2
+        content = self._chat(
+            state.audio,
+            context=state.context,
+            prefix=prefix,
+            max_tokens=max_tokens,
+        )
+        detected, candidate = _split_tag(content, language or None)
+        if (state.force_language or detected) == "Chinese":
+            candidate = _strip_cjk_spaces(candidate)
+        if final:
+            # 定稿：接受候选（前提是不回撤已发布文本）
+            if candidate and (not state.text or candidate.startswith(state.text)):
+                state.text = candidate
+                state.body = candidate
+            state.raw = state.text
+            state.preview = state.text
+            state.chunk_id += 1
+            return state
+        if not candidate:
+            # 只有标签/空结果（静音首轮）：不推进，下一轮重新起头
+            state.first = True
+            return state
+        if state.text and not candidate.startswith(state.text):
+            # 候选回撤已发布文本：丢弃本轮（T8 抛 StabilityViolation 的行为）
+            state.first = True
+            return state
+        fixed = self._rollback_tokens(candidate)
+        if (state.force_language or detected) == "Chinese":
+            fixed = _strip_cjk_spaces(fixed)
+        if len(fixed) < len(state.text):
+            fixed = state.text
+        if not fixed.startswith(state.text):
+            state.first = True
+            return state
+        state.text = fixed
+        state.body = candidate
+        state.detected_language = detected or state.detected_language
+        state.raw = content.split("|", 1)[0].replace("\ufffd", "")
+        state.preview = candidate
+        state.chunk_id += 1
+        state.first = False
+        return state
 
     def feed_stream(self, pcm: np.ndarray, state: Q8StreamingState) -> Q8StreamingState:
         state.buffer = np.concatenate(
             [state.buffer, np.asarray(pcm, dtype=np.float32).reshape(-1)]
         )
+        if self._stream_mode != "append":
+            return self._feed_stream_redecode(state)
+        step = max(0.02, float(state.chunk_size_sec)) * _SAMPLE_RATE
+        lookahead = max(0.0, float(state.lookahead_sec)) * _SAMPLE_RATE
+        while True:
+            need = step + (lookahead if state.first else 0)
+            # 首轮纯静音时继续累积，避免静音幻觉被固化进已发布文本
+            while (
+                state.first
+                and len(state.buffer) >= need
+                and _rms(state.buffer[: int(need)]) < 0.01
+                and len(state.buffer) < self._FIRST_SILENCE_MAX_SEC * _SAMPLE_RATE
+            ):
+                need += step
+            if len(state.buffer) < need:
+                break
+            state.audio = np.concatenate([state.audio, state.buffer[: int(need)]])
+            state.buffer = state.buffer[int(need) :]
+            state = self._decode_stream_append(state)
+        return state
+
+    def _feed_stream_redecode(self, state: Q8StreamingState) -> Q8StreamingState:
+        """兼容模式：每 N 秒用累积音频全量重解码（会重判，可能回撤）。"""
         interval = (
             max(0.2, float(state.chunk_size_sec) + float(state.lookahead_sec))
             if state.chunk_id == 0
@@ -728,14 +874,15 @@ class LlamaCppQ8Backend:
             state.buffer = np.empty(0, dtype=np.float32)
         if len(state.audio) == 0:
             return state
-        # 收尾用完整音频从头解码，保证句尾完整（避免 append-only 截断）
-        state.text = self._transcribe_audio(
-            state.audio,
-            context=state.context,
-            language=state.force_language,
-            enable_itn=False,
-        )
-        state.raw = state.text
-        state.preview = state.text
-        state.chunk_id += 1
-        return state
+        if self._stream_mode != "append":
+            state.text = self._transcribe_audio(
+                state.audio,
+                context=state.context,
+                language=state.force_language,
+                enable_itn=False,
+            )
+            state.raw = state.text
+            state.preview = state.text
+            state.chunk_id += 1
+            return state
+        return self._decode_stream_append(state, final=True)
