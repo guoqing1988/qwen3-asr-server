@@ -299,6 +299,47 @@ vLLM 引擎初始化在特定宿主环境（如 CPU 电压不稳、驱动兼容�
 > `forced aligner` 有独立的活跃计数与空闲计时：忙时绝不释放，也不会被主引擎连坐；声纹（CAM++）推理前会主动让 vLLM 引擎休眠以避让显存。
 > 启用 sleep 时项目固定传 `mm_processor_cache_gb=0`：否则唤醒后重复音频会命中失效的 multimodal cache 并报 `AssertionError`。
 
+### llama.cpp Q8 后端（低显存方案）
+
+`ASR_ENGINE=llamacpp` 时改用官方 Q8 GGUF，通过托管 `llama-server` 子进程推理，对外 API、输出结构与 vLLM 后端完全一致：
+
+- 离线、长音频、说话人分离、声纹、WebSocket 流式、two-pass 均可用；
+- ASR 显存约 **4GB**（vLLM bf16 约 8.3GB），单卡可与 CAM++（约 1GB）共存；
+- `word_timestamps=true` 仍使用 `Qwen3-ForcedAligner-0.6B`（懒加载，单独占显存）。
+
+**准备模型与二进制**：
+
+```bash
+# GGUF 模型（Q8_0 主模型 + mmproj）
+ls /data1/models/Confucius4-R2T2-GGUF/
+#   Confucius4-R2T2-Q8_0.gguf
+#   mmproj-Confucius4-R2T2-Q8_0.gguf
+
+# llama-server（需 CUDA 版本，支持 input_audio）
+/data1/www/llama.cpp/build/bin/llama-server --version
+```
+
+**`.env` 配置**：
+
+```dotenv
+ASR_ENGINE=llamacpp
+QWEN_LLAMACPP_MODEL_PATH=/data1/models/Confucius4-R2T2-GGUF/Confucius4-R2T2-Q8_0.gguf
+QWEN_LLAMACPP_MMPROJ_PATH=/data1/models/Confucius4-R2T2-GGUF/mmproj-Confucius4-R2T2-Q8_0.gguf
+QWEN_LLAMACPP_SERVER_BIN=/data1/www/llama.cpp/build/bin/llama-server
+QWEN_LLAMACPP_PORT=18090
+QWEN_LLAMACPP_CTX=8192
+```
+
+`sudo systemctl restart qwen3-asr` 生效。服务首次识别请求时自动启动 `llama-server`（约 2~4s），之后常驻；`unload()` 会终止该子进程。
+
+**行为说明**：
+
+- llama.cpp 单次音频编码上限约 60s，后端内部按 `QWEN_LLAMACPP_MAX_SEGMENT_SEC`（默认 25s）切段后拼接文本；
+- 流式改为**每 1s 用累积音频全量重解码**（首轮 0.32s）：llama-server 的 append-only prefix 续写在短音频上不稳定，全量重解码保证文本不倒退，20s 音频每轮约 0.3s；
+- 词级时间戳的 aligner 若因同卡显存不足启动失败，会自动提高 `gpu_memory_utilization` 重试（+0.1 / +0.2）。
+
+**回滚**：把 `ASR_ENGINE` 改回 `vllm`（或删除该行）并重启即可，vLLM 代码路径未改动。
+
 ## 从源码构建镜像
 
 ### 使用构建脚本

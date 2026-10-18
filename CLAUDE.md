@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Qwen3-ASR 服务（GPU 版）：Confucius4-R2T2（vLLM，默认且唯一 ASR 模型）+ FunASR 实时流式 + 声纹识别（sqlite-vec），支持 **Docker Compose** 与 **本地 systemd** 两种部署方式。
+Qwen3-ASR 服务（GPU 版）：Confucius4-R2T2（vLLM bf16 默认，可选 llama.cpp Q8，`ASR_ENGINE` 切换）+ FunASR 实时流式 + 声纹识别（sqlite-vec），支持 **Docker Compose** 与 **本地 systemd** 两种部署方式。
 
 ## 开发与运行
 
@@ -57,6 +57,13 @@ Qwen3-ASR 服务（GPU 版）：Confucius4-R2T2（vLLM，默认且唯一 ASR 模
 - 跑测试：`.venv/bin/python -m pytest tests/ -v`
 - Docker 环境：`docker cp tests/<file> qwen3-asr:/tmp/` → `docker exec qwen3-asr /opt/venv/bin/python -m pytest /tmp/test_*.py -v`
 - 相关测试：`test_idle_unload.py`（空闲/压力卸载）、`test_lazy_load_retry.py`（懒加载重试）、`test_startup_graceful_degrade.py`（降级启动）、`test_audio_decode_fallback.py`（音频解码三级兜底）
+
+## 推理后端：vLLM（默认）与 llama.cpp Q8
+
+`ASR_ENGINE=vllm`（默认）/ `llamacpp`，开关键在 `.env`，对外 API 与返回结构不变（含 `segments[].start/end`；`word_timestamps` 默认关，开启时返回 `words` 与真实时间）。
+
+- **llamacpp**：官方 Q8 GGUF（`/data1/models/Confucius4-R2T2-GGUF/`）+ 托管 `llama-server` 子进程（`app/services/asr/qwen3_llamacpp.py`）；ASR 显存约 4GB（vLLM 约 8.3GB），离线/流式/长音频/说话人分离全支持；单次音频上限约 60s，后端内部按 `QWEN_LLAMACPP_MAX_SEGMENT_SEC`（25s）切段；流式每 1s 用累积音频全量重解码（append-only prefix 在 llama.cpp 上不稳定），词级时间戳复用 `Qwen3-ForcedAligner-0.6B`；aligner 显存不足会自动提高 util 重试。
+- **回滚**：`.env` 改回 `ASR_ENGINE=vllm`（或删除）重启即可。
 
 ## 引擎容错与显存策略（已实现）
 

@@ -199,6 +199,8 @@ class Qwen3ASREngine(BaseASREngine):
                     model_path, forced_aligner_path,
                     max_inference_batch_size, max_new_tokens, max_model_len,
                 )
+            elif self._backend == "llamacpp":
+                self.model = self._load_llamacpp(forced_aligner_path)
             elif self._backend == "rust":
                 self.model = self._load_rust_backend(model_path, forced_aligner_path)
             self._warmup_forced_aligner()
@@ -208,6 +210,9 @@ class Qwen3ASREngine(BaseASREngine):
             raise DefaultServerErrorException(f"Failed to load Qwen3-ASR model: {e}")
 
     def _select_backend(self) -> str:
+        engine = (getattr(settings, "ASR_ENGINE", "vllm") or "vllm").strip().lower()
+        if engine == "llamacpp":
+            return "llamacpp"
         if self._device.startswith("cuda"):
             if not is_vllm_available():
                 raise DefaultServerErrorException(
@@ -390,6 +395,32 @@ class Qwen3ASREngine(BaseASREngine):
         if self._backend == "vllm":
             self.model.ensure_forced_aligner_loaded()
 
+    def _load_llamacpp(
+        self, forced_aligner_path: Optional[str]
+    ) -> "LlamaCppQ8Backend":
+        """Load the official Q8 GGUF pair through a managed llama-server process."""
+        from app.services.asr.qwen3_llamacpp import LlamaCppQ8Backend
+
+        logger.info(
+            "Loading Qwen3-ASR (llama.cpp Q8): model=%s, mmproj=%s, server=%s",
+            settings.QWEN_LLAMACPP_MODEL_PATH,
+            settings.QWEN_LLAMACPP_MMPROJ_PATH,
+            settings.QWEN_LLAMACPP_SERVER_BIN,
+        )
+        return LlamaCppQ8Backend(
+            model_path=settings.QWEN_LLAMACPP_MODEL_PATH,
+            mmproj_path=settings.QWEN_LLAMACPP_MMPROJ_PATH,
+            server_bin=settings.QWEN_LLAMACPP_SERVER_BIN,
+            context_size=settings.QWEN_LLAMACPP_CTX,
+            parallel=settings.QWEN_LLAMACPP_PARALLEL,
+            gpu_layers=settings.QWEN_LLAMACPP_GPU_LAYERS,
+            port=settings.QWEN_LLAMACPP_PORT,
+            max_segment_sec=settings.QWEN_LLAMACPP_MAX_SEGMENT_SEC,
+            forced_aligner_path=forced_aligner_path,
+            forced_aligner_gpu_memory_utilization=self._forced_aligner_gpu_memory_utilization_config,
+            forced_aligner_max_model_len=settings.QWEN_FORCE_ALIGNER_MAX_MODEL_LEN,
+        )
+
     def _load_vllm(
         self, model_path: str, forced_aligner_path: Optional[str],
         max_inference_batch_size: int, max_new_tokens: int,
@@ -437,7 +468,7 @@ class Qwen3ASREngine(BaseASREngine):
         if self._backend == "rust":
             text = self.model.transcribe_file(audio_path)
             return normalize_asr_text(text, enable_itn=enable_itn)
-        if self._backend == "vllm":
+        if self._backend in {"vllm", "llamacpp"}:
             return self.model.transcribe_text(
                 audio_path,
                 context=hotwords or "",
@@ -454,7 +485,7 @@ class Qwen3ASREngine(BaseASREngine):
         enable_itn: bool = False,
     ) -> str:
         """对内存音频做一次离线转写（流式段定稿 two-pass 用）。"""
-        if self._backend == "vllm":
+        if self._backend in {"vllm", "llamacpp"}:
             return self.model.transcribe_array(
                 audio,
                 context=context or "",
@@ -475,7 +506,7 @@ class Qwen3ASREngine(BaseASREngine):
         sample_rate: int = 16000,
         **kwargs,
     ) -> ASRRawResult:
-        if self._backend == "rust":
+        if self._backend in {"rust", "llamacpp"}:
             text = self.transcribe_file(
                 audio_path=audio_path,
                 hotwords=hotwords,
@@ -575,7 +606,7 @@ class Qwen3ASREngine(BaseASREngine):
                 )
             return output
 
-        if self._backend == "vllm":
+        if self._backend in {"vllm", "llamacpp"}:
             vllm_results = self.model.transcribe_batch(
                 [seg.temp_file for _, seg in valid],
                 context=hotwords or "",
@@ -598,7 +629,7 @@ class Qwen3ASREngine(BaseASREngine):
 
     @_handle_asr_error("初始化流式状态")
     def init_streaming_state(self, context: str = "", language: Optional[str] = None, **kwargs) -> Qwen3StreamingState:
-        if self._backend not in {"vllm", "rust"}:
+        if self._backend not in {"vllm", "rust", "llamacpp"}:
             raise DefaultServerErrorException(
                 f"Qwen3 backend={self._backend} does not support realtime streaming"
             )
@@ -629,7 +660,7 @@ class Qwen3ASREngine(BaseASREngine):
                 last_text="",
                 last_language=language or "",
             )
-        if self._backend == "vllm":
+        if self._backend in {"vllm", "llamacpp"}:
             # 官方 R2T2 默认：160ms chunk、unfixed 0/1；显式参数优先
             kwargs.setdefault("chunk_size_sec", settings.QWEN_STREAM_CHUNK_SEC)
             kwargs.setdefault("lookahead_sec", settings.QWEN_STREAM_LOOKAHEAD_SEC)
@@ -660,7 +691,7 @@ class Qwen3ASREngine(BaseASREngine):
 
     @_handle_asr_error("流式识别")
     def streaming_transcribe(self, pcm16k: np.ndarray, state: Qwen3StreamingState) -> Qwen3StreamingState:
-        if self._backend not in {"vllm", "rust"}:
+        if self._backend not in {"vllm", "rust", "llamacpp"}:
             raise DefaultServerErrorException(
                 f"Qwen3 backend={self._backend} does not support realtime streaming"
             )
@@ -689,7 +720,7 @@ class Qwen3ASREngine(BaseASREngine):
 
     @_handle_asr_error("结束流式识别")
     def finish_streaming_transcribe(self, state: Qwen3StreamingState) -> Qwen3StreamingState:
-        if self._backend not in {"vllm", "rust"}:
+        if self._backend not in {"vllm", "rust", "llamacpp"}:
             raise DefaultServerErrorException(
                 f"Qwen3 backend={self._backend} does not support realtime streaming"
             )
@@ -724,7 +755,7 @@ class Qwen3ASREngine(BaseASREngine):
         """
         if self.model is None:
             return
-        if self._backend == "vllm":
+        if self._backend in {"vllm", "llamacpp"}:
             self.model.shutdown()
         self.model = None
         logger.info("Qwen3-ASR model unloaded (backend=%s)", self._backend)
@@ -752,20 +783,26 @@ class Qwen3ASREngine(BaseASREngine):
         return False
 
     def sleep_aligner(self) -> None:
-        if self._backend == "vllm" and self.model is not None:
+        if self._backend in {"vllm", "llamacpp"} and self.model is not None:
             self.model.sleep_aligner()
 
     def aligner_is_loaded(self) -> bool:
+        if self._backend == "llamacpp" and self.model is not None:
+            return bool(self.model.is_aligner_loaded)
         if self._backend == "vllm" and self.model is not None:
             return bool(self.model.is_aligner_loaded())
         return False
 
     def aligner_is_busy(self) -> bool:
+        if self._backend == "llamacpp" and self.model is not None:
+            return bool(self.model.is_aligner_busy)
         if self._backend == "vllm" and self.model is not None:
             return bool(self.model.is_aligner_busy())
         return False
 
     def aligner_idle_seconds(self) -> float:
+        if self._backend == "llamacpp" and self.model is not None:
+            return float(self.model.aligner_idle_seconds())
         if self._backend == "vllm" and self.model is not None:
             return float(self.model.aligner_idle_seconds())
         return 0.0
@@ -774,6 +811,8 @@ class Qwen3ASREngine(BaseASREngine):
         """归还全部 vLLM 显存（供声纹等需要大块显存的步骤让路）。"""
         if self._backend == "vllm" and self.model is not None:
             self.model.sleep_all()
+        elif self._backend == "llamacpp" and self.model is not None:
+            self.model.sleep_aligner()
 
     @property
     def device(self) -> str:

@@ -3,7 +3,7 @@
 <h1>Qwen3-ASR</h1>
 <h3>开箱即用的本地私有化部署语音识别服务</h3>
 
-以 [Qwen3-ASR](https://github.com/QwenLM/Qwen3-ASR) 为核心的语音识别 API 服务，提供 CUDA vLLM 与 CPU Rust 两种后端，兼容阿里云语音 API 和 OpenAI Audio API，并保留 Paraformer realtime WebSocket 能力。
+以 [Qwen3-ASR](https://github.com/QwenLM/Qwen3-ASR) 为核心的语音识别 API 服务，提供 CUDA vLLM（默认）、CUDA llama.cpp Q8（低显存，可选）与 CPU Rust 后端，兼容阿里云语音 API 和 OpenAI Audio API，并保留 Paraformer realtime WebSocket 能力。
 
 [English](./README_en.md)
 
@@ -207,7 +207,7 @@ python start.py
   - 有 CUDA 时解析为 `cuda:0`
   - 否则解析为 `cpu`
 - `DEVICE=mps` 会直接归一化为 `cpu`
-- `Linux + CUDA` 使用官方 `vLLM`
+- `Linux + CUDA` 默认使用官方 `vLLM`；`ASR_ENGINE=llamacpp` 可切换到官方 Q8 GGUF（llama-server，显存约 4GB）
 - `Linux + CPU` 使用 vendored `QwenASR` Rust
 - `macOS / Apple Silicon` 也使用 vendored `QwenASR` Rust
 - macOS / Apple Silicon 默认总是 `qwen3-asr-0.6b`

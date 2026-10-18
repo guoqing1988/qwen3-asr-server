@@ -117,6 +117,23 @@ class Settings:
     QWEN_KV_CACHE_MEMORY_BYTES: Optional[int] = None
     # forced aligner 的 max_model_len
     QWEN_FORCE_ALIGNER_MAX_MODEL_LEN: Optional[int] = None
+    # ASR 推理后端：vllm（默认，bf16）| llamacpp（官方 GGUF Q8，低显存）
+    ASR_ENGINE: str = "vllm"
+    # llama.cpp Q8 后端（ASR_ENGINE=llamacpp 时生效）
+    QWEN_LLAMACPP_MODEL_PATH: str = (
+        "/data1/models/Confucius4-R2T2-GGUF/Confucius4-R2T2-Q8_0.gguf"
+    )
+    QWEN_LLAMACPP_MMPROJ_PATH: str = (
+        "/data1/models/Confucius4-R2T2-GGUF/mmproj-Confucius4-R2T2-Q8_0.gguf"
+    )
+    QWEN_LLAMACPP_SERVER_BIN: str = "/data1/www/llama.cpp/build/bin/llama-server"
+    # llama-server 监听端口；0 表示自动选择空闲端口
+    QWEN_LLAMACPP_PORT: int = 18090
+    QWEN_LLAMACPP_CTX: int = 8192
+    QWEN_LLAMACPP_PARALLEL: int = 1
+    QWEN_LLAMACPP_GPU_LAYERS: int = 99
+    # 单次送入 llama.cpp 的最大音频时长（实测单次上限约 60s，取 25s 留余量）
+    QWEN_LLAMACPP_MAX_SEGMENT_SEC: float = 25.0
     # 流式识别：单 chunk 生成上限（配置值作为硬上限，实际按 chunk 时长动态取小值）
     QWEN_STREAM_MAX_NEW_TOKENS: int = 512
     # 流式识别：解码粒度（秒）。官方 R2T2 推荐 0.16（80ms~2s 可调）
@@ -314,6 +331,36 @@ class Settings:
         self.QWEN_STREAM_FINAL_PASS = (
             os.getenv("QWEN_STREAM_FINAL_PASS", str(self.QWEN_STREAM_FINAL_PASS)).lower()
             in {"1", "true", "yes", "on"}
+        )
+        self.ASR_ENGINE = (
+            os.getenv("ASR_ENGINE", self.ASR_ENGINE) or self.ASR_ENGINE
+        ).strip().lower()
+        self.QWEN_LLAMACPP_MODEL_PATH = os.getenv(
+            "QWEN_LLAMACPP_MODEL_PATH", self.QWEN_LLAMACPP_MODEL_PATH
+        )
+        self.QWEN_LLAMACPP_MMPROJ_PATH = os.getenv(
+            "QWEN_LLAMACPP_MMPROJ_PATH", self.QWEN_LLAMACPP_MMPROJ_PATH
+        )
+        self.QWEN_LLAMACPP_SERVER_BIN = os.getenv(
+            "QWEN_LLAMACPP_SERVER_BIN", self.QWEN_LLAMACPP_SERVER_BIN
+        )
+        self.QWEN_LLAMACPP_PORT = int(
+            os.getenv("QWEN_LLAMACPP_PORT", str(self.QWEN_LLAMACPP_PORT))
+        )
+        self.QWEN_LLAMACPP_CTX = int(
+            os.getenv("QWEN_LLAMACPP_CTX", str(self.QWEN_LLAMACPP_CTX))
+        )
+        self.QWEN_LLAMACPP_PARALLEL = int(
+            os.getenv("QWEN_LLAMACPP_PARALLEL", str(self.QWEN_LLAMACPP_PARALLEL))
+        )
+        self.QWEN_LLAMACPP_GPU_LAYERS = int(
+            os.getenv("QWEN_LLAMACPP_GPU_LAYERS", str(self.QWEN_LLAMACPP_GPU_LAYERS))
+        )
+        self.QWEN_LLAMACPP_MAX_SEGMENT_SEC = float(
+            os.getenv(
+                "QWEN_LLAMACPP_MAX_SEGMENT_SEC",
+                str(self.QWEN_LLAMACPP_MAX_SEGMENT_SEC),
+            )
         )
 
         self.QWEN_FORCED_ALIGNER_ENABLED = (
