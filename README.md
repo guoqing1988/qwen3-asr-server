@@ -208,6 +208,7 @@ python start.py
   - 否则解析为 `cpu`
 - `DEVICE=mps` 会直接归一化为 `cpu`
 - `Linux + CUDA` 默认使用官方 `vLLM`；`ASR_ENGINE=llamacpp` 可切换到官方 Q8 GGUF（llama-server，显存约 4GB）
+  - Q8 流式默认走 `token` 级 append-only（`QWEN_LLAMACPP_STREAM_MODE=append`）：partial 只增不减、不回撤；`redecode` 可回退为每秒全量重解码
 - `Linux + CPU` 使用 vendored `QwenASR` Rust
 - `macOS / Apple Silicon` 也使用 vendored `QwenASR` Rust
 - macOS / Apple Silicon 默认总是 `qwen3-asr-0.6b`
