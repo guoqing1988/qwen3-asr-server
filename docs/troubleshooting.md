@@ -426,4 +426,5 @@ load=11.0s → before-sleep infer ok → sleep=3.7s（释放 6.45GiB）→ wake=
 3. **端口被占用**：`QWEN_LLAMACPP_PORT`（默认 18090）冲突时改端口，或设为 `0` 自动选择空闲端口。
 4. **词级时间戳首次约 27s / 日志报 `KV cache insufficient`**：Q8 主模型常驻约 4GB，aligner 沿用 0.2 会 KV 不足；代码已保底 `gpu_memory_utilization=0.35`，仍不足会自动 +0.1/+0.2 重试。若显存紧张可先不启用 `word_timestamps`。
 5. **流式首段文本缺失/错乱**：确认已包含「段内有效语音 ≥0.8s 才落定」的修复（本次提交）；音频开头长静音不会再产生极短误识别段。
-6. **回滚**：`.env` 改回 `ASR_ENGINE=vllm`（或删除）→ `sudo systemctl restart qwen3-asr`，vLLM 路径未改动。
+6. **词级时间戳后显存不回落（残留约 2GB）**：aligner 的 vLLM EngineCore 是独立子进程，`LLM.shutdown()` 不一定终止它；`LlamaCppQ8Backend.shutdown()` 已显式调用 `engine_core.shutdown(timeout=10)`，空闲卸载后会打日志 `Q8 forced aligner shutdown complete`。
+7. **回滚**：`.env` 改回 `ASR_ENGINE=vllm`（或删除）→ `sudo systemctl restart qwen3-asr`，vLLM 路径未改动。

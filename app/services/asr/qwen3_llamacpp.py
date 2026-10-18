@@ -264,13 +264,25 @@ class LlamaCppQ8Backend:
         with self._lock:
             self._stop_server_locked()
         with self._aligner_lock:
-            if self._aligner is not None:
+            aligner = self._aligner
+            self._aligner = None
+            self._aligner_sleeping = False
+            self._aligner_busy = 0
+        if aligner is not None:
+            # vLLM 的 EngineCore 是独立子进程，必须显式 shutdown 才能归还显存
+            engine_core = getattr(getattr(aligner, "llm_engine", None), "engine_core", None)
+            if engine_core is not None and hasattr(engine_core, "shutdown"):
                 try:
-                    self._aligner.shutdown()
-                except Exception:
-                    pass
-                self._aligner = None
-                self._aligner_sleeping = False
+                    engine_core.shutdown(timeout=10.0)
+                except Exception as exc:  # noqa: BLE001 - 卸载失败不应阻断流程
+                    logger.warning("Failed to shutdown Q8 forced aligner engine core: %s", exc)
+            shutdown = getattr(aligner, "shutdown", None)
+            if callable(shutdown):
+                try:
+                    shutdown()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Failed to shutdown Q8 forced aligner: %s", exc)
+            logger.info("Q8 forced aligner shutdown complete")
 
     # ------------------------------------------------------------------
     # HTTP generation
