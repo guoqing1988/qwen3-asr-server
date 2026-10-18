@@ -429,4 +429,6 @@ load=11.0s → before-sleep infer ok → sleep=3.7s（释放 6.45GiB）→ wake=
 6. **词级时间戳后显存不回落（残留约 2GB）**：aligner 的 vLLM EngineCore 是独立子进程，`LLM.shutdown()` 不一定终止它；`LlamaCppQ8Backend.shutdown()` 已显式调用 `engine_core.shutdown(timeout=10)`，空闲卸载后会打日志 `Q8 forced aligner shutdown complete`。
 7. **流式 partial 文本回撤（`写了一个信息的媒` → `又写了一个信息…`）**：旧实现每 1s 用累积音频全量重解码，跨轮重判必然回撤。已改为 T8 官方 append-only 协议（`QWEN_LLAMACPP_STREAM_MODE=append`）：token 级回滚 + `stable` 落后候选 1 token + 回撤候选整轮丢弃 + 标签独立维护 + 首轮静音跳过。`redecode` 模式可回退旧行为。
 8. **流式首轮只输出 `language X<asr_text>` 没有正文**：静音/过短音频下模型只生成标签；append 模式会把它当作空候选丢弃（不写入 prefix），下一轮重新起头，不会污染后续文本。
-9. **回滚**：`.env` 改回 `ASR_ENGINE=vllm`（或删除）→ `sudo systemctl restart qwen3-asr`，vLLM 路径未改动。
+9. **partial 里出现孤立的 `language` 并"卡一会"**：段末模型会另起一轮 `language X<asr_text>`，每轮 2 token 预算只够吐出 `language`；若并入正文会污染后续 prefix（模型反复续写标签、文本不增长）。`_strip_tag_residue` 已剥离行首 `language` / `language <语言名>` 行与结尾孤立 `language`（正文里的 `language models` 不受影响），且"只多出标签残留"的轮次不推进已发布文本、不写入 body。
+10. **partial 日志里同一段文本反复出现**：`result.text` 是「已定稿全文 + 当前段」，每次 partial 都是全量文本；只关心当前段请看 `result.current_segment_text`。
+11. **回滚**：`.env` 改回 `ASR_ENGINE=vllm`（或删除）→ `sudo systemctl restart qwen3-asr`，vLLM 路径未改动。

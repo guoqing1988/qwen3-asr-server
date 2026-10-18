@@ -10,6 +10,7 @@ import base64
 import io
 import logging
 import os
+import re
 import socket
 import subprocess
 import threading
@@ -109,6 +110,49 @@ def _rms(audio: np.ndarray) -> float:
     return float(np.sqrt(np.mean(np.square(audio, dtype=np.float64))))
 
 
+# 模型在段末/静音处会重新起头输出 `language X<asr_text>`；识别语言名以免误伤正文里的单词
+_LANGUAGE_NAMES = frozenset(
+    {
+        "chinese",
+        "english",
+        "cantonese",
+        "japanese",
+        "korean",
+        "german",
+        "french",
+        "russian",
+        "portuguese",
+        "spanish",
+        "italian",
+        "none",
+    }
+)
+
+
+def _strip_tag_residue(text: str) -> str:
+    """剥离正文末尾/行首残留的 `language X<asr_text>` 标签。
+
+    段末模型会在句号后另起一轮标签（`\nlanguage`），2 token 的生成预算只够
+    吐出 "language"，若并入正文会污染后续 prefix，导致每轮都在续写标签。
+    """
+    if not text:
+        return text
+    lines = text.split("\n")
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.lower() == "language":
+            return "\n".join(lines[:index]).rstrip()
+        match = re.match(r"(?i)^language\s+([a-z]+)\b", stripped)
+        if match and match.group(1).lower() in _LANGUAGE_NAMES:
+            return "\n".join(lines[:index]).rstrip()
+    trimmed = text.rstrip()
+    if trimmed.lower().endswith("language"):
+        head = trimmed[: -len("language")].rstrip()
+        if head and head[-1] in "\n。！？，、；：.!?;: ":
+            return head
+    return text
+
+
 def _split_tag(raw: str, forced_language: str | None = None) -> tuple[str, str]:
     """Always strip the `language X<asr_text>` tag (append-only protocol).
 
@@ -126,8 +170,8 @@ def _split_tag(raw: str, forced_language: str | None = None) -> tuple[str, str]:
                 break
         if language.lower() in {"none", "null"}:
             language = ""
-        return forced_language or language, text
-    return forced_language or "", raw
+        return forced_language or language, _strip_tag_residue(text)
+    return forced_language or "", _strip_tag_residue(raw)
 
 
 @dataclass
@@ -799,6 +843,9 @@ class LlamaCppQ8Backend:
         if not candidate:
             # 只有标签/空结果（静音首轮）：不推进，下一轮重新起头
             state.first = True
+            return state
+        if candidate == state.text:
+            # 本轮只多出标签残留（段末 `language`），不推进也不污染 body
             return state
         if state.text and not candidate.startswith(state.text):
             # 候选回撤已发布文本：丢弃本轮（T8 抛 StabilityViolation 的行为）

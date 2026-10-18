@@ -14,6 +14,7 @@ from app.services.asr.qwen3_llamacpp import (
     _join_segments,
     _parse_output,
     _split_audio,
+    _split_tag,
 )
 
 
@@ -136,6 +137,28 @@ def _append_backend(monkeypatch, replies) -> LlamaCppQ8Backend:
     return backend
 
 
+class TestSplitTag:
+    def test_strips_residual_language_label(self):
+        # 段末模型另起一轮标签：只吐出 "language"（2 token 预算下的截断）
+        assert _split_tag("language Chinese<asr_text>你好\nlanguage", None) == (
+            "Chinese",
+            "你好",
+        )
+        assert _split_tag("language Chinese<asr_text>好的。language", None) == (
+            "Chinese",
+            "好的。",
+        )
+        # 完整的新一轮标签也剥离
+        assert _split_tag(
+            "language Chinese<asr_text>你好\nlanguage English<asr_text>", None
+        ) == ("Chinese", "你好")
+
+    def test_keeps_normal_language_word(self):
+        assert _split_tag(
+            "language English<asr_text>language models are fun", None
+        ) == ("English", "language models are fun")
+
+
 class TestStreaming:
     def test_feed_stream_append_only_keeps_stable_prefix(self, monkeypatch):
         backend = _append_backend(
@@ -185,6 +208,23 @@ class TestStreaming:
         assert state.text == "完整句子。"
         assert len(state.audio) == 1600
         assert len(state.buffer) == 0
+
+    def test_label_residue_does_not_advance(self, monkeypatch):
+        backend = _append_backend(
+            monkeypatch,
+            [
+                "language Chinese<asr_text>你好",
+                "language Chinese<asr_text>你好\nlanguage",
+            ],
+        )
+        state = backend.init_streaming_state(chunk_size_sec=0.16, lookahead_sec=0.0)
+        speech = np.full(2560, 0.1, dtype=np.float32)
+        state = backend.feed_stream(speech, state)
+        assert state.text == "你"
+        state = backend.feed_stream(speech, state)
+        # 标签残留被剥离，不推进已发布文本、也不污染后续 prefix
+        assert state.text == "你"
+        assert state.body == "你好"
 
     def test_redecode_mode_still_supported(self, monkeypatch):
         backend = _make_backend(monkeypatch)
