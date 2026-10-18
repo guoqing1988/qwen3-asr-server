@@ -57,3 +57,20 @@ def normalize_asr_text(text: str, enable_itn: bool) -> str:
     if not enable_itn:
         return text
     return apply_itn_to_text(text)
+
+
+def merge_hotwords(default: str, request: str) -> str:
+    """合并默认热词与请求热词。
+
+    按英文逗号切分（短语内部空格保留，如 "Bank of China" 整体作为一个热词）、
+    精确匹配去重（大小写敏感，避免破坏英文写法）、保持顺序（默认在前、请求在后）。
+    离线与流式两条路径共用。
+    """
+    seen: set[str] = set()
+    merged: list[str] = []
+    for item in f"{default},{request}".split(","):
+        word = item.strip()
+        if word and word not in seen:
+            seen.add(word)
+            merged.append(word)
+    return ", ".join(merged)

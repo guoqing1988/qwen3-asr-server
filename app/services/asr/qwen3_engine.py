@@ -127,12 +127,12 @@ def _handle_asr_error(operation: str):
 @dataclass
 class Qwen3StreamingState:
     internal_state: Any
-    chunk_size_sec: float = 2.0
-    unfixed_chunk_num: int = 2
-    unfixed_token_num: int = 5
-    max_new_tokens: int = 32
-    max_new_tokens_initial: int = 32
-    warmup_chunks: int = 8
+    chunk_size_sec: float = 0.16
+    unfixed_chunk_num: int = 0
+    unfixed_token_num: int = 1
+    max_new_tokens: int = 512
+    max_new_tokens_initial: int | None = None
+    warmup_chunks: int | None = None
     language: Optional[str] = None
     chunk_count: int = 0
     last_text: str = ""
@@ -445,6 +445,26 @@ class Qwen3ASREngine(BaseASREngine):
             )
         raise DefaultServerErrorException(f"Qwen3 backend={self._backend} does not support offline transcription")
 
+    @_handle_asr_error("数组转写")
+    def transcribe_array(
+        self,
+        audio: np.ndarray,
+        context: str = "",
+        language: Optional[str] = None,
+        enable_itn: bool = False,
+    ) -> str:
+        """对内存音频做一次离线转写（流式段定稿 two-pass 用）。"""
+        if self._backend == "vllm":
+            return self.model.transcribe_array(
+                audio,
+                context=context or "",
+                language=language,
+                enable_itn=enable_itn,
+            )
+        raise DefaultServerErrorException(
+            f"Qwen3 backend={self._backend} does not support array transcription"
+        )
+
     @_handle_asr_error("VAD 转写")
     def transcribe_file_with_vad(
         self,
@@ -610,22 +630,24 @@ class Qwen3ASREngine(BaseASREngine):
                 last_language=language or "",
             )
         if self._backend == "vllm":
-            # 未显式指定时使用配置默认值（.env: QWEN_STREAM_*）
+            # 官方 R2T2 默认：160ms chunk、unfixed 0/1；显式参数优先
+            kwargs.setdefault("chunk_size_sec", settings.QWEN_STREAM_CHUNK_SEC)
+            kwargs.setdefault("lookahead_sec", settings.QWEN_STREAM_LOOKAHEAD_SEC)
+            kwargs.setdefault("unfixed_chunk_num", settings.QWEN_STREAM_UNFIXED_CHUNK_NUM)
+            kwargs.setdefault("unfixed_token_num", settings.QWEN_STREAM_UNFIXED_TOKEN_NUM)
+            kwargs.pop("max_new_tokens_initial", None)
+            kwargs.pop("warmup_chunks", None)
             if kwargs.get("max_new_tokens") in (None, ""):
                 kwargs["max_new_tokens"] = settings.QWEN_STREAM_MAX_NEW_TOKENS
-            if kwargs.get("max_new_tokens_initial") in (None, ""):
-                kwargs["max_new_tokens_initial"] = settings.QWEN_STREAM_MAX_NEW_TOKENS_INITIAL
-            if kwargs.get("warmup_chunks") in (None, ""):
-                kwargs["warmup_chunks"] = settings.QWEN_STREAM_WARMUP_CHUNKS
-            streaming_state = self.model.init_streaming_state(context=context, language=language, **kwargs)
+            streaming_state = self.model.init_streaming_state(
+                context=context, language=language, **kwargs
+            )
             return Qwen3StreamingState(
                 internal_state=streaming_state,
-                chunk_size_sec=float(kwargs.get("chunk_size_sec", 2.0)),
-                unfixed_chunk_num=int(kwargs.get("unfixed_chunk_num", 2)),
-                unfixed_token_num=int(kwargs.get("unfixed_token_num", 5)),
+                chunk_size_sec=float(kwargs.get("chunk_size_sec", 0.16)),
+                unfixed_chunk_num=int(kwargs.get("unfixed_chunk_num", 0)),
+                unfixed_token_num=int(kwargs.get("unfixed_token_num", 1)),
                 max_new_tokens=int(kwargs["max_new_tokens"]),
-                max_new_tokens_initial=int(kwargs["max_new_tokens_initial"]),
-                warmup_chunks=int(kwargs["warmup_chunks"]),
                 language=language,
                 chunk_count=int(getattr(streaming_state, "chunk_id", 0)),
                 last_text=str(getattr(streaming_state, "text", "") or ""),

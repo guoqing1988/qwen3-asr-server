@@ -16,25 +16,10 @@ from app.services.asr.model_selection import get_default_offline_model_id
 from app.services.asr.runtime import OfflineASRRequest, get_runtime_router
 from app.services.audio import get_audio_service
 from app.services.speaker import get_speaker_identification_service
+from app.utils.text_processing import merge_hotwords
 
 
 logger = logging.getLogger(__name__)
-
-
-def merge_hotwords(default: str, request: str) -> str:
-    """合并默认热词与请求热词。
-
-    按英文逗号切分（短语内部空格保留，如 "Bank of China" 整体作为一个热词）、
-    精确匹配去重（大小写敏感，避免破坏英文写法）、保持顺序（默认在前、请求在后）。
-    """
-    seen: set[str] = set()
-    merged: list[str] = []
-    for item in f"{default},{request}".split(","):
-        word = item.strip()
-        if word and word not in seen:
-            seen.add(word)
-            merged.append(word)
-    return ", ".join(merged)
 
 
 @dataclass(frozen=True)

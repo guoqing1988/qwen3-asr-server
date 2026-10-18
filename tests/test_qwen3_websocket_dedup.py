@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import numpy as np
 
+from app.core.config import settings
 from app.services.qwen3_websocket_asr import ConnectionContext, Qwen3ASRService
 
 
@@ -23,7 +24,7 @@ class _FakeStreamingState:
     def __init__(self, text: str = "repeated partial"):
         self.last_text = text
         self.last_language = "Chinese"
-        self.chunk_count = 0
+        self.chunk_count = 1
 
 
 class _FakeQwenEngine:
@@ -46,6 +47,15 @@ class _FakeQwenEngine:
         state: _FakeStreamingState,
     ) -> _FakeStreamingState:
         return state
+
+    def transcribe_array(
+        self,
+        audio: np.ndarray,
+        context: str = "",
+        language: str | None = None,
+        enable_itn: bool = False,
+    ) -> str:
+        return "unique segment"
 
 
 class _FakeLease:
@@ -85,21 +95,28 @@ class Qwen3WebSocketDedupTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         asyncio.get_running_loop().slow_callback_duration = 1.0
 
-    async def test_truncate_returns_each_confirmed_segment_once(self) -> None:
+    async def test_finalize_returns_each_confirmed_segment_once(self) -> None:
         service = Qwen3ASRService()
         engine = _FakeQwenEngine()
         ctx = ConnectionContext(
             params={"enable_inverse_text_normalization": True},
             engine=engine,
             streaming_state=_FakeStreamingState("unique segment"),
+            segment_audio=np.zeros(1600, dtype=np.float32),
         )
         websocket = _FakeWebSocket([])
 
-        with patch(
-            "app.services.qwen3_websocket_asr.run_sync",
-            new=_run_inline,
+        with (
+            patch(
+                "app.services.qwen3_websocket_asr.run_sync",
+                new=_run_inline,
+            ),
+            patch(
+                "app.services.qwen3_websocket_asr.create_stream_vad",
+                return_value=None,
+            ),
         ):
-            await service._truncate(websocket, ctx, "task", "silence")
+            await service._finalize_segment(websocket, ctx, "task", "silence")
 
         segment_end = websocket.events[0]
         self.assertEqual(segment_end["type"], "segment_end")
@@ -143,6 +160,10 @@ class Qwen3WebSocketDedupTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch("app.services.qwen3_websocket_asr.Qwen3ASREngine", _FakeQwenEngine),
             patch("app.services.qwen3_websocket_asr.run_sync", new=_run_inline),
+            patch(
+                "app.services.qwen3_websocket_asr.create_stream_vad",
+                return_value=None,
+            ),
         ):
             await service.handle_connection(websocket, "task")
 
@@ -153,6 +174,56 @@ class Qwen3WebSocketDedupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result_events), 1)
         self.assertEqual(len(result_events[0]["results"]), 1)
         self.assertEqual(result_events[0]["results"][0]["text"], "repeated partial")
+
+    async def test_stream_context_merges_default_hotwords(self) -> None:
+        captured: dict[str, object] = {}
+
+        class _CapturingEngine(_FakeQwenEngine):
+            def init_streaming_state(self, **kwargs: object) -> _FakeStreamingState:
+                captured["context"] = kwargs.get("context")
+                return _FakeStreamingState()
+
+        engine = _CapturingEngine()
+        websocket = _FakeWebSocket(
+            [
+                {
+                    "type": "websocket.receive",
+                    "text": json.dumps(
+                        {
+                            "type": "start",
+                            "payload": {
+                                "format": "pcm",
+                                "sample_rate": 16000,
+                                "context": "请求词",
+                            },
+                        }
+                    ),
+                },
+                {"type": "websocket.receive", "text": json.dumps({"type": "stop"})},
+            ]
+        )
+        service = Qwen3ASRService()
+
+        with (
+            patch(
+                "app.services.qwen3_websocket_asr.get_runtime_router",
+                return_value=_FakeRuntimeRouter(engine),
+            ),
+            patch(
+                "app.services.qwen3_websocket_asr.validate_realtime_model_id",
+                return_value="qwen3-asr-0.6b",
+            ),
+            patch("app.services.qwen3_websocket_asr.Qwen3ASREngine", _FakeQwenEngine),
+            patch("app.services.qwen3_websocket_asr.run_sync", new=_run_inline),
+            patch(
+                "app.services.qwen3_websocket_asr.create_stream_vad",
+                return_value=None,
+            ),
+            patch.object(settings, "ASR_DEFAULT_HOTWORDS", "默认词"),
+        ):
+            await service.handle_connection(websocket, "task")
+
+        self.assertEqual(captured["context"], "默认词, 请求词")
 
 
 if __name__ == "__main__":

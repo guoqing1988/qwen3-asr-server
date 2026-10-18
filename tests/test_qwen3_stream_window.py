@@ -1,118 +1,219 @@
 # -*- coding: utf-8 -*-
-"""Qwen3 流式滑动窗口测试。
+"""R2T2 流式：VAD 静音边界落定 / 无重叠拼接 / 动态生成长度测试。
 
-背景（2026-09-25）：实时任务可能持续数小时甚至一天，不能把全部音频和文本一直
-累积重算（实测 52.5s 连续语音滞后 6.2s）。改为「固定段窗口 + 静音/时长落定 +
-段间重叠去重」：
-
-- 单段超过 `QWEN_STREAM_SEGMENT_MAX_SEC` 秒，或累计静音超过
-  `QWEN_STREAM_SILENCE_SEC` 秒，即落定当前段并开新段 —— 保证每轮解码窗口恒定，
-  不随会话时长增长；
-- 新段开头预置上一段尾部 `QWEN_STREAM_OVERLAP_SEC` 秒音频（重叠），
-  识别结果做边界去重，避免强制切段处丢词/断句。
+背景（2026-10-18）：流式切段由「固定 12s 强切 + 1s 重叠 + 字符去重」改为
+官方推荐做法——FireRedVAD 句尾静音触发落定、段间无重叠、文本自然拼接；
+每轮生成上限按 chunk 时长动态计算（配置值仅作上限）。
 """
 
+import asyncio
 import unittest
+from typing import Callable
 
 import numpy as np
 
 from app.core.config import settings
-from app.services.asr.qwen3_engine import Qwen3StreamingState
-from app.services.asr.qwen3_vllm import VLLMRealtimeState
-from app.services.qwen3_websocket_asr import (
-    _SAMPLE_RATE,
-    ConnectionContext,
-    Qwen3ASRService,
-    _strip_overlap,
+from app.services.asr.qwen3_vllm import (
+    Qwen3VLLMBackend,
+    VLLMRealtimeState,
+    _build_stream_prefix,
+    _normalize_punct_by_context,
+    _strip_cjk_spaces,
 )
+from app.services.qwen3_websocket_asr import ConnectionContext, Qwen3ASRService
 
 
-class StripOverlapTest(unittest.TestCase):
-    def test_english_tail_overlap(self) -> None:
-        self.assertEqual(
-            _strip_overlap("So good to see you.", "you. Good to see you too."),
-            "Good to see you too.",
-        )
-
-    def test_chinese_tail_overlap(self) -> None:
-        self.assertEqual(_strip_overlap("我们去看电影。", "电影。然后回家。"), "然后回家。")
-
-    def test_no_overlap_keeps_text(self) -> None:
-        self.assertEqual(_strip_overlap("abc", "xyz"), "xyz")
-
-    def test_empty_inputs(self) -> None:
-        self.assertEqual(_strip_overlap("", "abc"), "abc")
-        self.assertEqual(_strip_overlap("abc", ""), "")
-
-    def test_case_insensitive_overlap(self) -> None:
-        """重叠音频处模型可能重排大小写（Really vs really），仍应去重。"""
-        self.assertEqual(
-            _strip_overlap(
-                "...really hard work",
-                "Really hard work getting our technology",
-            ),
-            "getting our technology",
-        )
-
-    def test_overlap_below_min_chars_is_kept(self) -> None:
-        """低于 min_chars 的巧合重叠不裁剪，避免误删真实内容。"""
-        self.assertEqual(_strip_overlap("abc", "cdef"), "cdef")
+async def _run_inline(
+    func: Callable[..., object],
+    *args: object,
+    **kwargs: object,
+) -> object:
+    return func(*args, **kwargs)
 
 
-class WindowTruncateTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.service = Qwen3ASRService()
-        self.max_samples = int(settings.QWEN_STREAM_SEGMENT_MAX_SEC * _SAMPLE_RATE)
-        self.silence_samples = int(settings.QWEN_STREAM_SILENCE_SEC * _SAMPLE_RATE)
-
-    def test_truncate_on_max_duration(self) -> None:
-        ctx = ConnectionContext()
-        ctx.total_samples = self.max_samples
-        self.assertTrue(self.service._need_truncate(ctx))
-
-    def test_truncate_on_silence(self) -> None:
-        ctx = ConnectionContext()
-        ctx.silence_samples = self.silence_samples
-        self.assertTrue(self.service._need_truncate(ctx))
-
-    def test_no_truncate_below_thresholds(self) -> None:
-        ctx = ConnectionContext()
-        ctx.total_samples = self.max_samples - 1
-        ctx.silence_samples = self.silence_samples - 1
-        self.assertFalse(self.service._need_truncate(ctx))
+class _FakeStreamingState:
+    def __init__(self, text: str = "段一文本") -> None:
+        self.last_text = text
+        self.last_language = "Chinese"
+        self.chunk_count = 1
 
 
-class SegmentTailTest(unittest.TestCase):
-    def _make_state(self, samples: int) -> Qwen3StreamingState:
-        inner = VLLMRealtimeState(
+class _FakeVAD:
+    def __init__(self) -> None:
+        self.reset_count = 0
+        self.detect_results: list[bool] = []
+        self.detected: list[int] = []
+
+    def reset(self) -> None:
+        self.reset_count += 1
+
+    def detect_speech_end(self, pcm: np.ndarray) -> bool:
+        self.detected.append(len(pcm))
+        return self.detect_results.pop(0) if self.detect_results else False
+
+
+class _FakeEngine:
+    supports_realtime = True
+    device = "cuda"
+
+    def __init__(self) -> None:
+        self.refined_text = "段一文本（离线校正）"
+        self.transcribe_calls: list[np.ndarray] = []
+        self.init_calls = 0
+
+    def init_streaming_state(self, **kwargs: object) -> _FakeStreamingState:
+        self.init_calls += 1
+        return _FakeStreamingState("")
+
+    def streaming_transcribe(
+        self, audio: np.ndarray, state: _FakeStreamingState
+    ) -> _FakeStreamingState:
+        state.chunk_count += 1
+        return state
+
+    def finish_streaming_transcribe(
+        self, state: _FakeStreamingState
+    ) -> _FakeStreamingState:
+        return state
+
+    def transcribe_array(
+        self,
+        audio: np.ndarray,
+        context: str = "",
+        language: str | None = None,
+        enable_itn: bool = False,
+    ) -> str:
+        self.transcribe_calls.append(audio)
+        return self.refined_text
+
+
+class _FakeWebSocket:
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+
+    async def send_json(self, event: dict) -> None:
+        self.events.append(event)
+
+
+class StreamVadDefaultsTest(unittest.TestCase):
+    def test_official_default_stream_params(self) -> None:
+        self.assertAlmostEqual(settings.QWEN_STREAM_CHUNK_SEC, 0.16)
+        self.assertAlmostEqual(settings.QWEN_STREAM_LOOKAHEAD_SEC, 0.16)
+        self.assertEqual(settings.QWEN_STREAM_UNFIXED_CHUNK_NUM, 0)
+        self.assertEqual(settings.QWEN_STREAM_UNFIXED_TOKEN_NUM, 1)
+        self.assertGreaterEqual(settings.QWEN_STREAM_SEGMENT_MAX_SEC, 60.0)
+
+    def test_dynamic_max_tokens_scales_with_chunk(self) -> None:
+        backend = object.__new__(Qwen3VLLMBackend)
+        state = VLLMRealtimeState(
             prompt_raw="",
-            language="English",
+            language="Chinese",
             chunk_size_sec=0.16,
             unfixed_chunk_num=0,
             unfixed_token_num=1,
             max_new_tokens=2048,
         )
-        inner.audio_accum = np.arange(samples, dtype=np.float32)
-        return Qwen3StreamingState(internal_state=inner)
+        # 160ms(2560) + 160ms lookahead → 5120/1280*2 = 8
+        self.assertEqual(backend._stream_max_new_tokens(state, 5120), 8)
+        # 配置值小于动态值时，配置值生效（作为硬上限）
+        state.max_new_tokens = 2
+        self.assertEqual(backend._stream_max_new_tokens(state, 5120), 2)
+        # <=0 表示不设上限
+        state.max_new_tokens = 0
+        self.assertEqual(backend._stream_max_new_tokens(state, 5120), 8)
 
-    def test_returns_tail_slice(self) -> None:
-        service = Qwen3ASRService()
-        ctx = ConnectionContext()
-        ctx.streaming_state = self._make_state(_SAMPLE_RATE * 5)
-        tail = service._extract_segment_tail(ctx)
-        expected_len = int(settings.QWEN_STREAM_OVERLAP_SEC * _SAMPLE_RATE)
-        self.assertIsNotNone(tail)
-        assert tail is not None
-        self.assertEqual(len(tail), expected_len)
-        # 取的应是尾部（最后 expected_len 个样本）
-        self.assertEqual(tail[-1], np.float32(_SAMPLE_RATE * 5 - 1))
+    def test_prefix_rolls_back_and_trims_pipe(self) -> None:
+        class _Tokenizer:
+            def encode(self, text: str, add_special_tokens: bool = False) -> list[str]:
+                return list(text)
 
-    def test_returns_none_without_vllm_state(self) -> None:
-        """Rust 流状态没有 audio_accum，应安全返回 None（不预置重叠）。"""
+            def decode(
+                self, ids: list[str], skip_special_tokens: bool = False
+            ) -> str:
+                return "".join(ids)
+
+        self.assertEqual(_build_stream_prefix(_Tokenizer(), "abc|", 1), "ab")
+        self.assertEqual(_build_stream_prefix(_Tokenizer(), "", 1), "")
+
+    def test_punctuation_and_cjk_space_normalization(self) -> None:
+        self.assertEqual(_normalize_punct_by_context("你好,world."), "你好，world.")
+        self.assertEqual(_strip_cjk_spaces("你 好 世 界"), "你好世界")
+        self.assertEqual(_strip_cjk_spaces("你 好 world"), "你好 world")
+
+
+class SegmentFinalizeTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        asyncio.get_running_loop().slow_callback_duration = 1.0
+
+    async def _finalize(self, *, final_pass: bool) -> tuple:
         service = Qwen3ASRService()
-        ctx = ConnectionContext()
-        ctx.streaming_state = None
-        self.assertIsNone(service._extract_segment_tail(ctx))
+        engine = _FakeEngine()
+        vad = _FakeVAD()
+        ctx = ConnectionContext(
+            params={
+                "context": "某某公司",
+                "language": "Chinese",
+                "enable_inverse_text_normalization": True,
+            },
+            engine=engine,
+            streaming_state=_FakeStreamingState("段一文本"),
+            vad=vad,
+            segment_audio=np.zeros(16000, dtype=np.float32),
+        )
+        websocket = _FakeWebSocket()
+
+        from unittest.mock import patch
+
+        with (
+            patch(
+                "app.services.qwen3_websocket_asr.run_sync",
+                new=_run_inline,
+            ),
+            patch.object(settings, "QWEN_STREAM_FINAL_PASS", final_pass),
+        ):
+            await service._finalize_segment(websocket, ctx, "task", "silence")
+        return service, ctx, engine, vad, websocket
+
+    async def test_finalize_uses_two_pass_text(self) -> None:
+        _, ctx, engine, vad, websocket = await self._finalize(final_pass=True)
+        self.assertEqual(len(engine.transcribe_calls), 1)
+        self.assertEqual(ctx.confirmed_segments[0]["text"], "段一文本（离线校正）")
+        self.assertEqual(ctx.confirmed_segments[0]["reason"], "silence")
+        self.assertEqual(vad.reset_count, 1)
+        self.assertEqual(websocket.events[0]["type"], "segment_end")
+        self.assertEqual(
+            websocket.events[0]["result"]["segment_text"], "段一文本（离线校正）"
+        )
+        self.assertEqual(websocket.events[1]["type"], "segment_start")
+
+    async def test_finalize_keeps_streaming_text_without_final_pass(self) -> None:
+        _, ctx, engine, _, _ = await self._finalize(final_pass=False)
+        self.assertEqual(engine.transcribe_calls, [])
+        self.assertEqual(ctx.confirmed_segments[0]["text"], "段一文本")
+
+    async def test_finalize_does_not_clear_pending_audio(self) -> None:
+        """VAD 在 chunk 边界落定，buffer 中剩余音频属于下一段，不能清空。"""
+        service = Qwen3ASRService()
+        remaining = np.ones(800, dtype=np.float32)
+        ctx = ConnectionContext(
+            params={"language": "Chinese"},
+            engine=_FakeEngine(),
+            streaming_state=_FakeStreamingState("段一文本"),
+            segment_audio=np.zeros(16000, dtype=np.float32),
+            audio_buffer=remaining,
+        )
+        websocket = _FakeWebSocket()
+
+        from unittest.mock import patch
+
+        with (
+            patch("app.services.qwen3_websocket_asr.run_sync", new=_run_inline),
+            patch.object(settings, "QWEN_STREAM_FINAL_PASS", False),
+        ):
+            await service._finalize_segment(websocket, ctx, "task", "silence")
+
+        self.assertEqual(ctx.audio_buffer.tolist(), remaining.tolist())
+        self.assertEqual(ctx.segment_audio.size, 0)
 
 
 if __name__ == "__main__":

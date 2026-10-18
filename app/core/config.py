@@ -117,22 +117,29 @@ class Settings:
     QWEN_KV_CACHE_MEMORY_BYTES: Optional[int] = None
     # forced aligner 的 max_model_len
     QWEN_FORCE_ALIGNER_MAX_MODEL_LEN: Optional[int] = None
-    # 流式识别：预热之后单 chunk 最大生成 token 数上限。
-    # 注意：本项目 vLLM 流式每轮都对累积音频做全量重算（非 KV 增量续写），
-    # 该值必须够大以覆盖整段累积文本，否则输出会被截断/抖动。
-    # max_tokens 是上限而非耗时，模型遇到 EOS 即停，调大不影响出字延迟。
+    # 流式识别：单 chunk 生成上限（配置值作为硬上限，实际按 chunk 时长动态取小值）
     QWEN_STREAM_MAX_NEW_TOKENS: int = 512
-    # 流式识别：预热期（前 QWEN_STREAM_WARMUP_CHUNKS 个 chunk）的上限，
-    # 此时音频短、文本短，小值即可（但太小会让 `language X<asr_text>` 前缀出不来）
-    QWEN_STREAM_MAX_NEW_TOKENS_INITIAL: int = 32
-    # 流式识别：预热 chunk 数（前 N 个 chunk 使用 initial 值）
-    QWEN_STREAM_WARMUP_CHUNKS: int = 8
-    # 流式：单段最大时长（秒）。超过即落定该段并开新段，保证解码窗口不随会话增长
-    QWEN_STREAM_SEGMENT_MAX_SEC: float = 12.0
-    # 流式：静音切段阈值（秒），累计静音超过该值即落定当前段（自然句边界优先）
+    # 流式识别：解码粒度（秒）。官方 R2T2 推荐 0.16（80ms~2s 可调）
+    QWEN_STREAM_CHUNK_SEC: float = 0.16
+    # 流式识别：首个 chunk 额外 lookahead 音频（秒），用于首段语言/专名判断
+    QWEN_STREAM_LOOKAHEAD_SEC: float = 0.16
+    # 流式识别：前 N 个 chunk 不接历史 prefix（官方默认 0）
+    QWEN_STREAM_UNFIXED_CHUNK_NUM: int = 0
+    # 流式识别：prefix 回滚 token 数（官方默认 1）
+    QWEN_STREAM_UNFIXED_TOKEN_NUM: int = 1
+    # 流式识别：单段最大时长（秒）。超过即落定该段并开新段
+    QWEN_STREAM_SEGMENT_MAX_SEC: float = 60.0
+    # 流式识别：能量阈值回退时的静音切段阈值（秒），VAD 不可用时生效
     QWEN_STREAM_SILENCE_SEC: float = 2.0
-    # 流式：段间重叠音频（秒），减弱强制切段处的丢词/断句
-    QWEN_STREAM_OVERLAP_SEC: float = 1.0
+    # 流式识别：段间重叠音频（秒）。官方 append-only 不需要重叠，默认关闭
+    QWEN_STREAM_OVERLAP_SEC: float = 0.0
+    # 流式 VAD：FireRedVAD Stream-VAD 模型目录（不存在时回退能量阈值）
+    QWEN_STREAM_VAD_MODEL_PATH: str = "/data1/models/FireRedVAD/Stream-VAD"
+    # 流式 VAD：连续静音帧数（10ms/帧，官方 ws_server 用 20；项目转录场景
+    # 取 50（500ms）避免中文句内短停顿把一句话切碎）
+    QWEN_STREAM_VAD_MIN_SILENCE_FRAMES: int = 50
+    # 流式：段定稿时用离线路径重转（two-pass，提升热词/专名；关闭可省一次推理）
+    QWEN_STREAM_FINAL_PASS: bool = True
     # Forced aligner（词级时间戳）配置
     # 是否在启动完整性检查中要求 aligner 模型存在
     QWEN_FORCED_ALIGNER_ENABLED: bool = True
@@ -264,14 +271,25 @@ class Settings:
                 "QWEN_STREAM_MAX_NEW_TOKENS", str(self.QWEN_STREAM_MAX_NEW_TOKENS)
             )
         )
-        self.QWEN_STREAM_MAX_NEW_TOKENS_INITIAL = int(
+        self.QWEN_STREAM_CHUNK_SEC = float(
+            os.getenv("QWEN_STREAM_CHUNK_SEC", str(self.QWEN_STREAM_CHUNK_SEC))
+        )
+        self.QWEN_STREAM_LOOKAHEAD_SEC = float(
             os.getenv(
-                "QWEN_STREAM_MAX_NEW_TOKENS_INITIAL",
-                str(self.QWEN_STREAM_MAX_NEW_TOKENS_INITIAL),
+                "QWEN_STREAM_LOOKAHEAD_SEC", str(self.QWEN_STREAM_LOOKAHEAD_SEC)
             )
         )
-        self.QWEN_STREAM_WARMUP_CHUNKS = int(
-            os.getenv("QWEN_STREAM_WARMUP_CHUNKS", str(self.QWEN_STREAM_WARMUP_CHUNKS))
+        self.QWEN_STREAM_UNFIXED_CHUNK_NUM = int(
+            os.getenv(
+                "QWEN_STREAM_UNFIXED_CHUNK_NUM",
+                str(self.QWEN_STREAM_UNFIXED_CHUNK_NUM),
+            )
+        )
+        self.QWEN_STREAM_UNFIXED_TOKEN_NUM = int(
+            os.getenv(
+                "QWEN_STREAM_UNFIXED_TOKEN_NUM",
+                str(self.QWEN_STREAM_UNFIXED_TOKEN_NUM),
+            )
         )
         self.QWEN_STREAM_SEGMENT_MAX_SEC = float(
             os.getenv(
@@ -283,6 +301,19 @@ class Settings:
         )
         self.QWEN_STREAM_OVERLAP_SEC = float(
             os.getenv("QWEN_STREAM_OVERLAP_SEC", str(self.QWEN_STREAM_OVERLAP_SEC))
+        )
+        self.QWEN_STREAM_VAD_MODEL_PATH = os.getenv(
+            "QWEN_STREAM_VAD_MODEL_PATH", self.QWEN_STREAM_VAD_MODEL_PATH
+        )
+        self.QWEN_STREAM_VAD_MIN_SILENCE_FRAMES = int(
+            os.getenv(
+                "QWEN_STREAM_VAD_MIN_SILENCE_FRAMES",
+                str(self.QWEN_STREAM_VAD_MIN_SILENCE_FRAMES),
+            )
+        )
+        self.QWEN_STREAM_FINAL_PASS = (
+            os.getenv("QWEN_STREAM_FINAL_PASS", str(self.QWEN_STREAM_FINAL_PASS)).lower()
+            in {"1", "true", "yes", "on"}
         )
 
         self.QWEN_FORCED_ALIGNER_ENABLED = (

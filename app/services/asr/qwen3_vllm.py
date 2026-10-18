@@ -71,40 +71,91 @@ def _load_audio(audio_path: str) -> np.ndarray:
 
 
 def _build_chat_prompt(context: str = "", language: Optional[str] = None) -> str:
-    instructions: list[str] = []
-    if language:
-        instructions.append(f"Transcribe the speech in {language}.")
-    else:
-        instructions.append("Transcribe the speech accurately.")
-    if context.strip():
-        instructions.append(f"Use this context when resolving named entities: {context.strip()}")
-    system_text = " ".join(instructions).strip()
-    return (
-        f"<|im_start|>system\n{system_text}<|im_end|>\n"
+    """构造官方 qwen_asr 等价 prompt。
+
+    - system 直接承载 context/热词原文（官方约定），不附加任何自然语言指令；
+    - 指定语言时在生成提示后追加 `language X<asr_text>`，让模型直接续写正文，
+      避免每轮重复预测语言标签（R2T2 流式稳定前缀的关键）。
+    """
+    context_text = (context or "").strip()
+    prompt = (
+        f"<|im_start|>system\n{context_text}<|im_end|>\n"
         "<|im_start|>user\n<|audio_start|><|audio_pad|><|audio_end|><|im_end|>\n"
         "<|im_start|>assistant\n"
     )
+    if language:
+        prompt += f"language {language}<asr_text>"
+    return prompt
 
 
 def _build_stream_prefix(tokenizer: Any, raw_decoded: str, unfixed_token_num: int) -> str:
     """构造流式解码的 prefix：已定稿的历史文本（去掉末尾 unfixed_token_num 个 token）。
 
-    本项目每轮都是「全量音频 + 全量文本重算」（无 vLLM KV 增量续写），prefix 必须
-    是完整历史；只取末尾 N 个 token 会丢掉全部历史，导致输出逐轮丢内容。
-
-    注：原始输出用 skip_special_tokens=False 解码，`<asr_text>` 等标记必须保留，
-    否则 `_parse_asr_output` 无法切分语言段与正文。
+    对齐官方 R2T2 实现：先按 `|` 截断，再按 token 回滚；解码若出现替换字符
+    U+FFFD（截断在多字节字符中间）则继续多回滚一个 token，保证 prefix 合法。
     """
-    if not raw_decoded:
+    raw = (raw_decoded or "").split("|")[0]
+    if not raw:
         return ""
-    token_ids = tokenizer.encode(raw_decoded, add_special_tokens=False)
-    if unfixed_token_num > 0:
-        keep = token_ids[: -unfixed_token_num] if len(token_ids) > unfixed_token_num else []
-    else:
-        keep = token_ids
-    if not keep:
-        return ""
-    return tokenizer.decode(keep, skip_special_tokens=False).replace("\ufffd", "")
+    token_ids = tokenizer.encode(raw, add_special_tokens=False)
+    rollback = max(0, int(unfixed_token_num))
+    while True:
+        end = max(0, len(token_ids) - rollback)
+        prefix = (
+            tokenizer.decode(token_ids[:end], skip_special_tokens=False)
+            if end > 0
+            else ""
+        )
+        if "\ufffd" not in prefix:
+            return prefix.split("|")[0]
+        if end == 0:
+            return ""
+        rollback += 1
+
+
+_EN2ZH_PUNCT = {
+    ",": "，",
+    ".": "。",
+    "!": "！",
+    "?": "？",
+    ";": "；",
+    ":": "：",
+    "(": "（",
+    ")": "）",
+}
+_ZH2EN_PUNCT = {v: k for k, v in _EN2ZH_PUNCT.items()}
+_ALL_PUNCT_PAT = re.compile(r"[,\.!?;:()\uff0c\u3002\uff01\uff1f\uff1b\uff1a\uff08\uff09]")
+
+
+def _normalize_punct_by_context(text: str) -> str:
+    """按前一个非空白字符的语言归一标点（官方 R2T2 实现）。
+
+    中文后用全角标点，英文/数字后用半角标点，其余保持原样。
+    """
+    if not text:
+        return text
+
+    def _replace(match: re.Match[str]) -> str:
+        punct = match.group()
+        prev_char = ""
+        for i in range(match.start() - 1, -1, -1):
+            if not text[i].isspace():
+                prev_char = text[i]
+                break
+        if not prev_char:
+            return punct
+        if "\u4e00" <= prev_char <= "\u9fff":
+            return _EN2ZH_PUNCT.get(punct, punct)
+        if prev_char.isascii() and (prev_char.isalnum() or prev_char in "\"'"):
+            return _ZH2EN_PUNCT.get(punct, punct)
+        return punct
+
+    return _ALL_PUNCT_PAT.sub(_replace, text)
+
+
+def _strip_cjk_spaces(text: str) -> str:
+    """去掉中文字符之间被模型插入的空格（保留中英混排中的英文空格）。"""
+    return re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", text)
 
 
 def _build_alignment_prompt(tokens: list[str]) -> str:
@@ -267,8 +318,11 @@ class VLLMRealtimeState:
     unfixed_chunk_num: int
     unfixed_token_num: int
     max_new_tokens: int
-    max_new_tokens_initial: int = 32
-    warmup_chunks: int = 8
+    force_language: str | None = None
+    lookahead_samples: int = 0
+    # 兼容旧调用方：预热参数已废弃（官方算法用动态 max_new_tokens）
+    max_new_tokens_initial: int | None = None
+    warmup_chunks: int | None = None
     chunk_id: int = 0
     text: str = ""
     raw_decoded: str = ""
@@ -616,6 +670,19 @@ class Qwen3VLLMBackend:
         transcript = self._run_generate([(_load_audio(audio_path), context, language)])[0]
         return normalize_asr_text(transcript.text, enable_itn=enable_itn)
 
+    def transcribe_array(
+        self,
+        audio: np.ndarray,
+        context: str = "",
+        language: Optional[str] = None,
+        enable_itn: bool = False,
+    ) -> str:
+        """对内存音频做一次离线转写（用于流式段落 two-pass 定稿）。"""
+        transcript = self._run_generate(
+            [(np.asarray(audio, dtype=np.float32), context, language)]
+        )[0]
+        return normalize_asr_text(transcript.text, enable_itn=enable_itn)
+
     def transcribe_raw(
         self,
         audio_path: str,
@@ -767,22 +834,33 @@ class Qwen3VLLMBackend:
         *,
         context: str = "",
         language: Optional[str] = None,
-        chunk_size_sec: float = 2.0,
-        unfixed_chunk_num: int = 2,
-        unfixed_token_num: int = 5,
-        max_new_tokens: int = 32,
-        max_new_tokens_initial: int = 32,
-        warmup_chunks: int = 8,
+        chunk_size_sec: float = 0.16,
+        unfixed_chunk_num: int = 0,
+        unfixed_token_num: int = 1,
+        max_new_tokens: int = 512,
+        lookahead_sec: float = 0.16,
+        max_new_tokens_initial: int | None = None,
+        warmup_chunks: int | None = None,
         initial_audio: np.ndarray | None = None,
     ) -> VLLMRealtimeState:
-        normalized_language = _normalize_language_name(language) or ""
+        """初始化 R2T2 流式状态（官方参数：160ms chunk / unfixed 0+1）。
+
+        - ``chunk_size_sec``：解码粒度，官方推荐 0.16（80ms~2s 可调）；
+        - ``lookahead_sec``：首个 chunk 额外音频，用于首段语言/专名判断；
+        - ``max_new_tokens``：配置的生成上限，实际按 chunk 时长动态取小值；
+        - ``initial_audio``：兼容旧段间重叠逻辑，新调用方不再使用。
+        """
+        normalized_language = _normalize_language_name(language)
+        force_language = normalized_language or None
         return VLLMRealtimeState(
-            prompt_raw=_build_chat_prompt(context=context, language=normalized_language or None),
-            language=normalized_language,
-            chunk_size_sec=chunk_size_sec,
-            unfixed_chunk_num=unfixed_chunk_num,
-            unfixed_token_num=unfixed_token_num,
-            max_new_tokens=max_new_tokens,
+            prompt_raw=_build_chat_prompt(context=context, language=force_language),
+            language=normalized_language or "",
+            force_language=force_language,
+            chunk_size_sec=float(chunk_size_sec),
+            unfixed_chunk_num=int(unfixed_chunk_num),
+            unfixed_token_num=int(unfixed_token_num),
+            max_new_tokens=int(max_new_tokens),
+            lookahead_samples=int(max(0.0, float(lookahead_sec)) * _DEFAULT_SAMPLE_RATE),
             max_new_tokens_initial=max_new_tokens_initial,
             warmup_chunks=warmup_chunks,
             audio_accum=(
@@ -793,21 +871,31 @@ class Qwen3VLLMBackend:
             audio_buffer=np.array([], dtype=np.float32),
         )
 
-    def _decode_stream(self, state: VLLMRealtimeState) -> VLLMRealtimeState:
-        # prefix = 已定稿的历史文本（见 _build_stream_prefix 说明）；预热 chunk 内不定稿
+    def _stream_max_new_tokens(self, state: VLLMRealtimeState, chunk_samples: int) -> int:
+        """按 chunk 时长计算生成上限（官方约 80ms 音频 = 1 token）。
+
+        ``max_new_tokens`` 配置值作为硬上限（<=0 表示不设上限），默认动态值
+        约为 ``(chunk + lookahead) / 1280 * 2``，兼顾中英文（中文 token 更密）。
+        """
+        dynamic = max(2, int(chunk_samples / 1280) * 2)
+        cap = int(state.max_new_tokens or 0)
+        if cap > 0:
+            return max(1, min(cap, dynamic))
+        return dynamic
+
+    def _decode_stream(
+        self, state: VLLMRealtimeState, chunk_samples: int
+    ) -> VLLMRealtimeState:
+        # prefix = 已定稿的历史文本（见 _build_stream_prefix 说明）
         prefix = ""
         if state.chunk_id >= state.unfixed_chunk_num and state.raw_decoded:
             prefix = _build_stream_prefix(
                 self._tokenizer, state.raw_decoded, state.unfixed_token_num
             )
 
-        # 预热期给足 token，让模型先吐出 `language X<asr_text>` 前缀；稳定期只做
-        # 增量生成以降低出字延迟（前缀没出来时正文永远解析不到）
-        max_tokens = (
-            state.max_new_tokens_initial
-            if state.chunk_id < state.warmup_chunks
-            else state.max_new_tokens
-        )
+        # 官方 R2T2：每轮生成量按当前 chunk 时长自适应（几 token 即可），
+        # 配置值只作为上限，避免历史上 2048 这类大值拖慢单轮解码。
+        max_tokens = self._stream_max_new_tokens(state, chunk_samples)
         with self._main_in_use():
             output = self._llm.generate(
                 [
@@ -817,14 +905,25 @@ class Qwen3VLLMBackend:
                     }
                 ],
                 sampling_params=self._sampling_params_cls(
-                    temperature=0.01,
+                    temperature=0.0,
                     max_tokens=max_tokens,
+                    skip_special_tokens=True,
                 ),
                 use_tqdm=False,
             )[0]
-        generated = str(output.outputs[0].text if output.outputs else "")
-        parsed_language, parsed_text = _parse_asr_output(prefix + generated, state.language or None)
-        state.raw_decoded = prefix + generated
+        generated = _normalize_punct_by_context(
+            str(output.outputs[0].text if output.outputs else "")
+        ).replace("\ufffd", "")
+        raw = (prefix + generated).split("|")[0]
+        parsed_language, parsed_text = _parse_asr_output(
+            raw, state.force_language or state.language or None
+        )
+        if state.force_language:
+            parsed_language = state.force_language
+        if state.force_language == "Chinese" or parsed_language == "Chinese":
+            raw = _strip_cjk_spaces(raw)
+            parsed_text = _strip_cjk_spaces(parsed_text)
+        state.raw_decoded = raw
         state.text = parsed_text
         state.language = parsed_language or state.language
         state.chunk_id += 1
@@ -832,19 +931,31 @@ class Qwen3VLLMBackend:
 
     def feed_stream(self, pcm: np.ndarray, state: VLLMRealtimeState) -> VLLMRealtimeState:
         state.audio_buffer = np.concatenate([state.audio_buffer, pcm.astype(np.float32)])
-        segment_size = int(max(state.chunk_size_sec, 0.1) * _DEFAULT_SAMPLE_RATE)
-        while len(state.audio_buffer) >= segment_size:
-            segment = state.audio_buffer[:segment_size].copy()
-            state.audio_buffer = state.audio_buffer[segment_size:]
+        segment_size = int(max(state.chunk_size_sec, 0.02) * _DEFAULT_SAMPLE_RATE)
+        while True:
+            # 首个 chunk 额外带 lookahead 音频，后续按固定 chunk 大小
+            need = segment_size + (state.lookahead_samples if state.chunk_id == 0 else 0)
+            if len(state.audio_buffer) < need:
+                break
+            segment = state.audio_buffer[:need].copy()
+            state.audio_buffer = state.audio_buffer[need:]
             state.audio_accum = np.concatenate([state.audio_accum, segment])
-            state = self._decode_stream(state)
+            state = self._decode_stream(state, chunk_samples=len(segment))
         return state
 
     def finish_stream(self, state: VLLMRealtimeState) -> VLLMRealtimeState:
+        step_samples = int(max(state.chunk_size_sec, 0.02) * _DEFAULT_SAMPLE_RATE)
         if len(state.audio_buffer) > 0:
-            state.audio_accum = np.concatenate([state.audio_accum, state.audio_buffer])
+            tail = state.audio_buffer
+            state.audio_accum = np.concatenate([state.audio_accum, tail])
             state.audio_buffer = np.array([], dtype=np.float32)
-            state = self._decode_stream(state)
+            # 尾块可能很短，仍按一个完整 chunk 给足生成长度，避免句尾被截断
+            state = self._decode_stream(
+                state, chunk_samples=max(len(tail), step_samples)
+            )
         elif state.chunk_id == 0 and len(state.audio_accum) > 0:
-            state = self._decode_stream(state)
+            state = self._decode_stream(
+                state,
+                chunk_samples=max(len(state.audio_accum), step_samples),
+            )
         return state

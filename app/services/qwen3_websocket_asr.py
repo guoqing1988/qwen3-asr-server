@@ -18,38 +18,13 @@ from app.core.executor import run_sync
 from app.services.asr.model_selection import validate_realtime_model_id
 from app.services.asr.qwen3_engine import Qwen3ASREngine, Qwen3StreamingState
 from app.services.asr.runtime import RuntimeEngineLease, get_runtime_router
-from app.utils.text_processing import normalize_asr_text
+from app.services.asr.stream_vad import StreamVAD, create_stream_vad
+from app.utils.text_processing import merge_hotwords, normalize_asr_text
 
 logger = logging.getLogger(__name__)
 
 # 流式音频固定按 16kHz 处理；段/静音阈值以秒配置，此处换算为采样点数
 _SAMPLE_RATE = 16000
-
-
-def _strip_overlap(
-    previous_text: str,
-    current_text: str,
-    *,
-    max_chars: int = 120,
-    min_chars: int = 2,
-) -> str:
-    """去除 current_text 开头与 previous_text 结尾重叠的部分。
-
-    段间预置了重叠音频（QWEN_STREAM_OVERLAP_SEC），新段识别结果会在开头重复
-    上一段尾部内容；此处做字符级后缀/前缀匹配去重（中英混排均适用）。
-    """
-    current = current_text.strip()
-    previous = previous_text.strip()
-    if not current or not previous:
-        return current
-    limit = min(len(previous), len(current), max_chars)
-    # 大小写不敏感匹配：重叠音频处模型可能重排大小写（"Really" vs "really"）
-    previous_lower = previous.lower()
-    current_lower = current.lower()
-    for size in range(limit, min_chars - 1, -1):
-        if previous_lower.endswith(current_lower[:size]):
-            return current[size:].lstrip(" \t,，.。!！?？;；:：")
-    return current
 
 
 def _convert_audio(
@@ -93,13 +68,17 @@ class ConnectionContext:
         default_factory=lambda: np.array([], dtype=np.float32)
     )
     streaming_state: Optional[Qwen3StreamingState] = None
+    vad: Optional[StreamVAD] = None
+    # 当前段的完整音频（two-pass 定稿重转用）
+    segment_audio: np.ndarray = field(
+        default_factory=lambda: np.array([], dtype=np.float32)
+    )
     silence_samples: int = 0
     total_samples: int = 0
     confirmed_segments: List[Dict[str, Any]] = field(default_factory=list)
     segment_index: int = 0
     last_partial_text: str = ""
-    # 上一段尾部音频：作为新段开头的重叠预置，减弱强制切段处的丢词
-    segment_tail: Optional[np.ndarray] = None
+
 
 
 class Qwen3ASRService:
@@ -122,31 +101,12 @@ class Qwen3ASRService:
             )
 
         ctx.engine = engine
+        if ctx.vad is None:
+            ctx.vad = create_stream_vad()
         return engine
 
     def _has_voice(self, audio: np.ndarray) -> bool:
         return np.sqrt(np.mean(audio**2)) >= 0.015
-
-    def _need_truncate(self, ctx: ConnectionContext) -> bool:
-        """段窗口控制：单段最长 QWEN_STREAM_SEGMENT_MAX_SEC 秒（保证解码窗口恒定，
-        不随会话时长增长），或累计静音达 QWEN_STREAM_SILENCE_SEC 秒（自然句边界优先）。"""
-        max_samples = int(settings.QWEN_STREAM_SEGMENT_MAX_SEC * _SAMPLE_RATE)
-        silence_limit = int(settings.QWEN_STREAM_SILENCE_SEC * _SAMPLE_RATE)
-        return ctx.total_samples >= max_samples or ctx.silence_samples >= silence_limit
-
-    def _extract_segment_tail(self, ctx: ConnectionContext) -> Optional[np.ndarray]:
-        """取本段已送入引擎音频的尾部 OVERLAP_SEC 秒，作为下一段的重叠预置。
-
-        Rust 后端的流状态没有 audio_accum，此处会返回 None（无重叠）。“
-        """
-        overlap_samples = int(settings.QWEN_STREAM_OVERLAP_SEC * _SAMPLE_RATE)
-        if overlap_samples <= 0:
-            return None
-        internal = getattr(ctx.streaming_state, "internal_state", None)
-        accumulated = getattr(internal, "audio_accum", None)
-        if not isinstance(accumulated, np.ndarray) or accumulated.size == 0:
-            return None
-        return accumulated[-overlap_samples:].copy()
 
     def _normalize_output_text(self, text: str, ctx: ConnectionContext) -> str:
         return normalize_asr_text(
@@ -154,39 +114,63 @@ class Qwen3ASRService:
             enable_itn=bool(ctx.params.get("enable_inverse_text_normalization", True)),
         )
 
-    async def _truncate(
+    async def _finalize_segment(
         self,
         websocket: WebSocket,
         ctx: ConnectionContext,
         task_id: str,
         reason: str,
     ) -> None:
+        """落定当前段：finish 流式状态 → 可选离线重转 → 推送 → 重建 state。
+
+        VAD 在 chunk 边界触发，audio_buffer 中尚未处理的音频属于下一段，
+        因此这里不清空 audio_buffer。
+        """
         try:
             engine = await self._ensure_engine(ctx)
-
-            if len(ctx.audio_buffer) > 0:
+            segment_text = ""
+            if ctx.streaming_state is not None and ctx.streaming_state.chunk_count > 0:
                 ctx.streaming_state = await run_sync(
-                    engine.streaming_transcribe,
-                    ctx.audio_buffer,
+                    engine.finish_streaming_transcribe,
                     ctx.streaming_state,
                 )
+                segment_text = self._normalize_output_text(
+                    ctx.streaming_state.last_text or "", ctx
+                )
 
-            ctx.streaming_state = await run_sync(
-                engine.finish_streaming_transcribe,
-                ctx.streaming_state,
-            )
+            # two-pass：段音频走离线路径重转，修正 append-only 流式无法回改的
+            # 专名/热词错误；失败时保留流式结果
+            if (
+                settings.QWEN_STREAM_FINAL_PASS
+                and ctx.segment_audio.size > 0
+                and segment_text.strip()
+            ):
+                try:
+                    refined = await run_sync(
+                        engine.transcribe_array,
+                        ctx.segment_audio,
+                        ctx.params.get("context", ""),
+                        ctx.params.get("language"),
+                        bool(
+                            ctx.params.get("enable_inverse_text_normalization", True)
+                        ),
+                    )
+                    refined = self._normalize_output_text(refined, ctx)
+                    if refined.strip():
+                        if refined.strip() != segment_text.strip():
+                            logger.info(
+                                "[%s] Final pass corrected segment: %r -> %r",
+                                task_id,
+                                segment_text,
+                                refined,
+                            )
+                        segment_text = refined
+                except Exception as exc:  # noqa: BLE001 - 重转失败不影响流式结果
+                    logger.warning(
+                        "[%s] Segment final pass failed: %s", task_id, exc
+                    )
 
-            segment_text = self._normalize_output_text(
-                ctx.streaming_state.last_text or "",
-                ctx,
-            )
-            # 段间重叠音频会让新段开头重复上一段尾部文本，去重后再落定
-            previous_text = (
-                ctx.confirmed_segments[-1]["text"] if ctx.confirmed_segments else ""
-            )
-            segment_text = _strip_overlap(previous_text, segment_text)
-            is_valid = len(segment_text.strip()) >= 3
-
+            is_valid = len(segment_text.strip()) >= 2
             if is_valid:
                 ctx.confirmed_segments.append(
                     {
@@ -220,28 +204,40 @@ class Qwen3ASRService:
 
                 ctx.segment_index += 1
                 logger.info(
-                    "[%s] Segment truncated, new segment %s", task_id, ctx.segment_index
+                    "[%s] Segment finalized: reason=%s text=%r",
+                    task_id,
+                    reason,
+                    segment_text,
                 )
             else:
                 logger.debug("[%s] Short segment filtered: %r", task_id, segment_text)
 
-            # 记录本段尾部音频，作为下一段的重叠预置
-            ctx.segment_tail = self._extract_segment_tail(ctx)
-
-            ctx.audio_buffer = np.array([], dtype=np.float32)
             ctx.silence_samples = 0
             ctx.total_samples = 0
             ctx.last_partial_text = ""
+            ctx.segment_audio = np.array([], dtype=np.float32)
+            if ctx.vad is not None:
+                ctx.vad.reset()
             ctx.streaming_state = engine.init_streaming_state(
                 context=ctx.params.get("context", ""),
                 language=ctx.params.get("language"),
-                chunk_size_sec=ctx.params.get("chunk_size_sec", 2.0),
-                unfixed_chunk_num=ctx.params.get("unfixed_chunk_num", 2),
-                unfixed_token_num=ctx.params.get("unfixed_token_num", 5),
-                max_new_tokens=ctx.params.get("max_new_tokens"),
-                max_new_tokens_initial=ctx.params.get("max_new_tokens_initial"),
-                warmup_chunks=ctx.params.get("warmup_chunks"),
-                initial_audio=ctx.segment_tail,
+                chunk_size_sec=ctx.params.get(
+                    "chunk_size_sec", settings.QWEN_STREAM_CHUNK_SEC
+                ),
+                lookahead_sec=ctx.params.get(
+                    "lookahead_sec", settings.QWEN_STREAM_LOOKAHEAD_SEC
+                ),
+                unfixed_chunk_num=ctx.params.get(
+                    "unfixed_chunk_num", settings.QWEN_STREAM_UNFIXED_CHUNK_NUM
+                ),
+                unfixed_token_num=ctx.params.get(
+                    "unfixed_token_num", settings.QWEN_STREAM_UNFIXED_TOKEN_NUM
+                ),
+                max_new_tokens=(
+                    ctx.params["max_new_tokens"]
+                    if ctx.params.get("max_new_tokens") is not None
+                    else settings.QWEN_STREAM_MAX_NEW_TOKENS
+                ),
             )
 
             if is_valid:
@@ -254,7 +250,7 @@ class Qwen3ASRService:
                 )
 
         except Exception as exc:
-            logger.error("[%s] Truncate failed: %s", task_id, exc)
+            logger.error("[%s] Finalize segment failed: %s", task_id, exc)
             raise
 
     async def _send_error(
@@ -299,17 +295,29 @@ class Qwen3ASRService:
                             "format": payload.get("format", "pcm"),
                             "sample_rate": payload.get("sample_rate", 16000),
                             "language": payload.get("language"),
-                            "context": payload.get("context", ""),
+                            "context": merge_hotwords(
+                                settings.ASR_DEFAULT_HOTWORDS,
+                                payload.get("context", ""),
+                            ),
                             "enable_inverse_text_normalization": payload.get(
                                 "enable_inverse_text_normalization",
                                 True,
                             ),
-                            "chunk_size_sec": payload.get("chunk_size_sec", 2.0),
-                            "unfixed_chunk_num": payload.get("unfixed_chunk_num", 2),
-                            "unfixed_token_num": payload.get("unfixed_token_num", 5),
-                            "max_new_tokens": payload.get("max_new_tokens"),
-                            "max_new_tokens_initial": payload.get("max_new_tokens_initial"),
-                            "warmup_chunks": payload.get("warmup_chunks"),
+                            "chunk_size_sec": payload.get(
+                                "chunk_size_sec", settings.QWEN_STREAM_CHUNK_SEC
+                            ),
+                            "lookahead_sec": payload.get(
+                                "lookahead_sec", settings.QWEN_STREAM_LOOKAHEAD_SEC
+                            ),
+                            "unfixed_chunk_num": payload.get(
+                                "unfixed_chunk_num", settings.QWEN_STREAM_UNFIXED_CHUNK_NUM
+                            ),
+                            "unfixed_token_num": payload.get(
+                                "unfixed_token_num", settings.QWEN_STREAM_UNFIXED_TOKEN_NUM
+                            ),
+                            "max_new_tokens": payload.get(
+                                "max_new_tokens", settings.QWEN_STREAM_MAX_NEW_TOKENS
+                            ),
                         }
 
                         engine = await self._ensure_engine(ctx)
@@ -317,11 +325,14 @@ class Qwen3ASRService:
                             context=ctx.params["context"],
                             language=ctx.params["language"],
                             chunk_size_sec=ctx.params["chunk_size_sec"],
+                            lookahead_sec=ctx.params["lookahead_sec"],
                             unfixed_chunk_num=ctx.params["unfixed_chunk_num"],
                             unfixed_token_num=ctx.params["unfixed_token_num"],
-                            max_new_tokens=ctx.params.get("max_new_tokens"),
-                            max_new_tokens_initial=ctx.params.get("max_new_tokens_initial"),
-                            warmup_chunks=ctx.params.get("warmup_chunks"),
+                            max_new_tokens=(
+                                ctx.params["max_new_tokens"]
+                                if ctx.params.get("max_new_tokens") is not None
+                                else settings.QWEN_STREAM_MAX_NEW_TOKENS
+                            ),
                         )
 
                         await websocket.send_json(
@@ -369,38 +380,43 @@ class Qwen3ASRService:
                         continue
 
                     ctx.total_samples += len(audio)
+                    ctx.segment_audio = np.concatenate([ctx.segment_audio, audio])
 
                     if self._has_voice(audio):
                         ctx.silence_samples = 0
                     else:
                         ctx.silence_samples += len(audio)
 
-                    if self._need_truncate(ctx):
-                        silence_limit = int(
-                            settings.QWEN_STREAM_SILENCE_SEC * _SAMPLE_RATE
-                        )
-                        reason = (
-                            "silence"
-                            if ctx.silence_samples >= silence_limit
-                            else "max_duration"
-                        )
-                        await self._truncate(websocket, ctx, task_id, reason)
-
                     ctx.audio_buffer = np.concatenate([ctx.audio_buffer, audio])
 
-                    chunk_size = int(ctx.params["chunk_size_sec"] * 16000)
+                    chunk_size = int(ctx.params["chunk_size_sec"] * _SAMPLE_RATE)
                     results = []
+                    speech_ended = False
+                    engine = await self._ensure_engine(ctx)
 
                     while len(ctx.audio_buffer) >= chunk_size:
                         chunk = ctx.audio_buffer[:chunk_size]
                         ctx.audio_buffer = ctx.audio_buffer[chunk_size:]
 
-                        engine = await self._ensure_engine(ctx)
+                        # 优先用 FireRedVAD 的句尾静音事件；不可用时回退能量阈值
+                        if ctx.vad is not None:
+                            speech_ended = await run_sync(
+                                ctx.vad.detect_speech_end, chunk
+                            )
+                        else:
+                            speech_ended = ctx.silence_samples >= int(
+                                settings.QWEN_STREAM_SILENCE_SEC * _SAMPLE_RATE
+                            )
+
                         ctx.streaming_state = await run_sync(
                             engine.streaming_transcribe,
                             chunk,
                             ctx.streaming_state,
                         )
+
+                        # 句尾已出现：停止消费缓冲区，剩余音频属于下一段
+                        if speech_ended:
+                            break
 
                         current = self._normalize_output_text(
                             ctx.streaming_state.last_text or "",
@@ -424,6 +440,12 @@ class Qwen3ASRService:
                                 }
                             )
 
+                        if speech_ended:
+                            break
+
+                    max_samples = int(settings.QWEN_STREAM_SEGMENT_MAX_SEC * _SAMPLE_RATE)
+
+                    # 先推 partial，再落定段（保证客户端看到 result → segment_end 的顺序）
                     if results:
                         await websocket.send_json(
                             {
@@ -435,6 +457,13 @@ class Qwen3ASRService:
                             }
                         )
                         ctx.state = ConnectionState.STREAMING
+
+                    if speech_ended or ctx.total_samples >= max_samples:
+                        reason = "silence" if speech_ended else "max_duration"
+                        await self._finalize_segment(websocket, ctx, task_id, reason)
+                        # VAD 在 chunk 边界落定：buffer 中剩余音频属于下一段
+                        ctx.segment_audio = ctx.audio_buffer.copy()
+                        ctx.total_samples = len(ctx.audio_buffer)
 
         except WebSocketDisconnect:
             logger.info("[%s] WebSocket disconnected", task_id)
@@ -469,29 +498,14 @@ class Qwen3ASRService:
                     ctx.streaming_state,
                 )
 
-            ctx.streaming_state = await run_sync(
-                engine.finish_streaming_transcribe,
-                ctx.streaming_state,
-            )
+            # 末段走与静音边界相同的落定流程（finish + 可选 two-pass）
+            await self._finalize_segment(websocket, ctx, task_id, "final")
 
-            final = self._normalize_output_text(
-                ctx.streaming_state.last_text or "", ctx
+            final = (
+                ctx.confirmed_segments[-1]["text"]
+                if ctx.confirmed_segments
+                else ""
             )
-            # 末段同样可能因重叠预置而重复上一段尾部，需要去重
-            previous_text = (
-                ctx.confirmed_segments[-1]["text"] if ctx.confirmed_segments else ""
-            )
-            final = _strip_overlap(previous_text, final)
-            if final.strip():
-                ctx.confirmed_segments.append(
-                    {
-                        "index": ctx.segment_index,
-                        "text": final,
-                        "language": ctx.streaming_state.last_language,
-                        "reason": "final",
-                    }
-                )
-
             all_texts = [
                 segment["text"]
                 for segment in ctx.confirmed_segments
