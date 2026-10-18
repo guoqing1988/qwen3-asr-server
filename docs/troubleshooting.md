@@ -431,4 +431,7 @@ load=11.0s → before-sleep infer ok → sleep=3.7s（释放 6.45GiB）→ wake=
 8. **流式首轮只输出 `language X<asr_text>` 没有正文**：静音/过短音频下模型只生成标签；append 模式会把它当作空候选丢弃（不写入 prefix），下一轮重新起头，不会污染后续文本。
 9. **partial 里出现孤立的 `language` 并"卡一会"**：段末模型会另起一轮 `language X<asr_text>`，每轮 2 token 预算只够吐出 `language`；若并入正文会污染后续 prefix（模型反复续写标签、文本不增长）。`_strip_tag_residue` 已剥离行首 `language` / `language <语言名>` 行与结尾孤立 `language`（正文里的 `language models` 不受影响），且"只多出标签残留"的轮次不推进已发布文本、不写入 body。
 10. **partial 日志里同一段文本反复出现**：`result.text` 是「已定稿全文 + 当前段」，每次 partial 都是全量文本；只关心当前段请看 `result.current_segment_text`。
-11. **回滚**：`.env` 改回 `ASR_ENGINE=vllm`（或删除）→ `sudo systemctl restart qwen3-asr`，vLLM 路径未改动。
+11. **第二次 `word_timestamps` 请求卡死不返回**：aligner 空闲 15s 会被 `sleep_aligner` 休眠归还显存；休眠状态下 `encode` 会挂起（实测 >300s 无响应）。`_get_aligner()` 与 `align_transcript()` 现在都会在 encode 前检测 `_aligner_sleeping` 并 `wake_up()`，实测唤醒后第二次请求 21s、第三次 0.7s 正常。
+12. **partial 文本前缀看似"回撤"（`不是三` → `不是33`、`退休的七` → `退休的70`）**：这是 ITN 数字规范化在文本增长后改写了已发布前缀（既有行为，vLLM 路径相同），不是识别回撤；如需绝对单调应按 `current_segment_text` 的定稿结果展示或关闭数字规范化。
+13. **非法音频返回 400 而非 500**：`normalize_audio_for_asr` / `convert_audio_to_wav` 失败属客户端输入问题，已改为 `InvalidParameterException`（HTTP 400），OpenAI 兼容接口同时新增 `APIException` → 状态码映射。
+14. **回滚**：`.env` 改回 `ASR_ENGINE=vllm`（或删除）→ `sudo systemctl restart qwen3-asr`，vLLM 路径未改动。

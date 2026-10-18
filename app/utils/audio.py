@@ -471,7 +471,8 @@ def convert_audio_to_wav(
         stderr = (e.stderr or b"").decode("utf-8", "ignore").strip()
         errors.append(f"ffmpeg: {stderr or f'退出码 {e.returncode}'}")
 
-    raise DefaultServerErrorException(f"音频格式转换失败: {'; '.join(errors)}")
+    # 音频由客户端提供，转换失败属于不可用的输入 → 400（而不是 500）
+    raise InvalidParameterException(f"音频格式转换失败: {'; '.join(errors)}")
 
 
 def normalize_audio_for_asr(audio_path: str, target_sr: int = 16000) -> NormalizedAudio:
@@ -506,8 +507,11 @@ def normalize_audio_for_asr(audio_path: str, target_sr: int = 16000) -> Normaliz
 
         return NormalizedAudio(path=normalized_path, timestamp_scale=timestamp_scale)
 
+    except InvalidParameterException:
+        raise
     except Exception as e:
-        raise DefaultServerErrorException(f"音频标准化失败: {str(e)}")
+        # 输入音频无法解析/解码 → 400，避免把客户端问题报成服务端 500
+        raise InvalidParameterException(f"音频标准化失败: {str(e)}")
 
 
 def generate_temp_audio_path(prefix: str = "audio", suffix: str = ".wav") -> str:

@@ -104,3 +104,29 @@
 - Q8 质量略低于 bf16（示例音频出现 `tendbreak`、`fifty seven`），热词与专名仍生效；
 - 流式默认 append-only（160ms chunk、token 级续写、partial 只增不减），`redecode` 模式可回退为 1s 全量重解码；
 - `word_timestamps=true` 时 aligner 与 llama-server 同卡，峰值约 11GB，靠对齐后 sleep 回落。
+
+
+### 回归测试（2026-10-18 晚）
+
+单测：`.venv/bin/python -m pytest tests/ -q` → **152 passed**。
+
+生产接口（18109，Q8）回归 14 项，全部 PASS：
+
+| 用例 | 结果 |
+|---|---|
+| `/v1/models` | 200 |
+| OpenAI 10s / 40s | 200，文本与 segments 正常 |
+| 热词（`prompt` / `vocabulary_id`） | 200 |
+| `word_timestamps=true` | 首次 29.4s（含 aligner 加载）、连续第二次 21.4s（修复后）、第三次 0.7s，顶层 `words[]` 32 项 |
+| `enable_itn=false` / `enable_speaker_diarization=false` | 200 |
+| `response_format=text/verbose_json/srt` | 200 |
+| 阿里云 `/stream/v1/asr` | 200 |
+| 并发 2 路 10s | 200，wall 0.57s |
+| 非法音频 | 修复后 400（原 500） |
+
+流式（10 分钟音频、append-only）：`language` 残留 0；partial 前缀变化仅来自 ITN 数字规范化（`一→1`、`七→70`），非识别回撤。
+
+修复的问题：
+
+1. **aligner 休眠后 `encode` 挂起**：`_get_aligner()` / `align_transcript()` 增加唤醒（第二次 `word_timestamps` 曾卡死 >300s）。
+2. **非法音频返回 500**：`normalize_audio_for_asr` / `convert_audio_to_wav` 改为 `InvalidParameterException`，OpenAI 兼容接口新增 `APIException` 状态码映射 → 400。

@@ -18,7 +18,7 @@ import av
 import numpy as np
 import soundfile as sf
 
-from app.core.exceptions import DefaultServerErrorException
+from app.core.exceptions import InvalidParameterException
 from app.utils.audio import convert_audio_to_wav
 
 
@@ -114,7 +114,8 @@ class AudioDecodeFallbackTest(unittest.TestCase):
         with open(bad, "wb") as f:
             f.write(bytes(np.random.default_rng(1).integers(0, 256, 4096, dtype=np.uint8)))
 
-        with self.assertRaises(DefaultServerErrorException) as ctx:
+        # 输入音频不可解码属客户端错误 → InvalidParameterException（HTTP 400）
+        with self.assertRaises(InvalidParameterException) as ctx:
             convert_audio_to_wav(bad, os.path.join(self.tmp, "garbage.wav"))
 
         message = str(ctx.exception)

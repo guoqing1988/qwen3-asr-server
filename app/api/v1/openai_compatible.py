@@ -18,7 +18,9 @@ from pydantic import BaseModel, Field
 from ...core.config import settings
 from ...core.security import validate_openai_token
 from ...core.exceptions import (
+    APIException,
     create_error_response,
+    get_http_status_code,
 )
 from ...services.asr.model_selection import (
     get_default_offline_model_id,
@@ -629,6 +631,13 @@ async def create_transcription(
             )
             return JSONResponse(content=payload)
 
+    except APIException as api_exc:
+        # 参数/输入类异常（如音频无法解码）按内部错误码映射为 4xx
+        logger.error(f"[OpenAI API] 业务异常: {api_exc.message}")
+        return JSONResponse(
+            content=api_exc.to_dict(),
+            status_code=get_http_status_code(api_exc.status_code),
+        )
     except HTTPException as http_exc:
         # 将 HTTPException 转换为标准错误格式
         logger.error(f"[OpenAI API] HTTP异常: {http_exc.detail}")

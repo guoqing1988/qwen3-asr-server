@@ -571,7 +571,17 @@ class LlamaCppQ8Backend:
         if not self._forced_aligner_path:
             raise RuntimeError("word_timestamps requires a configured forced aligner model")
         with self._aligner_lock:
-            return self._get_aligner_locked()
+            aligner = self._get_aligner_locked()
+            if self._aligner_sleeping:
+                # sleep 状态下 encode 会挂起（实测第二次 word_timestamps 卡死），必须先唤醒
+                started = time.monotonic()
+                aligner.wake_up()
+                self._aligner_sleeping = False
+                logger.info(
+                    "Q8 forced aligner woke up before alignment in %.2fs",
+                    time.monotonic() - started,
+                )
+            return aligner
 
     def _get_aligner_locked(self) -> Any:
         if self._aligner is None:
@@ -652,6 +662,11 @@ class LlamaCppQ8Backend:
         prompt = _build_alignment_prompt(tokens)
         audio_array = audio if audio is not None else _load_audio(audio_path)
         with self._aligner_lock:
+            if self._aligner_sleeping:
+                # 拿到锁后可能刚被空闲检查休眠，再确认一次
+                aligner.wake_up()
+                self._aligner_sleeping = False
+                logger.info("Q8 forced aligner woke up (pre-encode)")
             self._aligner_busy += 1
             try:
                 outputs = aligner.encode(
