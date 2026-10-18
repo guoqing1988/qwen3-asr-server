@@ -144,7 +144,7 @@ class Qwen3ASREngine(BaseASREngine):
 
     @property
     def supports_realtime(self) -> bool:
-        return self._backend in {"vllm", "rust"}
+        return self._backend in {"vllm", "rust", "llamacpp"}
 
     def __init__(
         self,

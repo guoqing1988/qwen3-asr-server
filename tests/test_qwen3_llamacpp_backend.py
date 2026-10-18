@@ -142,6 +142,11 @@ class TestStreaming:
 
 
 class TestBackendSelection:
+    def test_llamacpp_supports_realtime(self):
+        engine = object.__new__(Qwen3ASREngine)
+        engine._backend = "llamacpp"
+        assert engine.supports_realtime is True
+
     def test_llamacpp_selected_by_config(self, monkeypatch):
         monkeypatch.setattr(settings, "ASR_ENGINE", "llamacpp")
         engine = object.__new__(Qwen3ASREngine)

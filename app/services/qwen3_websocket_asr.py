@@ -75,6 +75,8 @@ class ConnectionContext:
     )
     silence_samples: int = 0
     total_samples: int = 0
+    # 当前段内检测到语音的样本数（避免开头长静音导致极短段被错误落定）
+    segment_voice_samples: int = 0
     confirmed_segments: List[Dict[str, Any]] = field(default_factory=list)
     segment_index: int = 0
     last_partial_text: str = ""
@@ -384,6 +386,7 @@ class Qwen3ASRService:
 
                     if self._has_voice(audio):
                         ctx.silence_samples = 0
+                        ctx.segment_voice_samples += len(audio)
                     else:
                         ctx.silence_samples += len(audio)
 
@@ -458,11 +461,15 @@ class Qwen3ASRService:
                         )
                         ctx.state = ConnectionState.STREAMING
 
-                    if speech_ended or ctx.total_samples >= max_samples:
+                    if (
+                        speech_ended
+                        and ctx.segment_voice_samples >= int(0.8 * _SAMPLE_RATE)
+                    ) or ctx.total_samples >= max_samples:
                         reason = "silence" if speech_ended else "max_duration"
                         await self._finalize_segment(websocket, ctx, task_id, reason)
                         # VAD 在 chunk 边界落定：buffer 中剩余音频属于下一段
                         ctx.segment_audio = ctx.audio_buffer.copy()
+                        ctx.segment_voice_samples = 0
                         ctx.total_samples = len(ctx.audio_buffer)
 
         except WebSocketDisconnect:

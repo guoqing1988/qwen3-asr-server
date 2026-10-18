@@ -504,7 +504,9 @@ class LlamaCppQ8Backend:
             )
             if util is None:
                 util = settings.QWEN_GPU_MEMORY_UTILIZATION
-            util = float(util if util is not None else 0.2)
+            # Q8 ASR（llama-server）常驻约 4GB，面向 vLLM 主引擎 sleep 后的 0.2
+            # 会因 KV cache 不足白等约 90s 才报错；直接保底 0.35。
+            util = max(float(util if util is not None else 0.35), 0.35)
             if self._aligner_max_model_len is not None:
                 kwargs["max_model_len"] = int(self._aligner_max_model_len)
             logger.info("Loading Qwen3 forced aligner for Q8 backend: %s", self._forced_aligner_path)
