@@ -410,3 +410,20 @@ load=11.0s → before-sleep infer ok → sleep=3.7s（释放 6.45GiB）→ wake=
 2. **推理设备默认 `auto`**（`VOICEPRINT_DEVICE=auto`）：有 CUDA 用 GPU、无则 CPU。分段限长后 GPU 不再有风险：实测 30s 音频峰值 840MiB（reserved）/ 712MiB，比 CPU 快 5~8 倍（30s 音频 37ms vs 291ms；实测 10 段×24s GPU 2.6s，含首次 CUDA 初始化）。提取完 `torch.cuda.empty_cache()` 归还缓存（reserved 不会自动释放）。
 
 回归测试：`.venv/bin/python -m pytest tests/test_voiceprint_embedding_chunking.py -v`（11 项：短音频单次、长音频切片与时长加权、尾片丢弃、参考音频全路径、按分段提取、超长单段细分、短段跳过、全短段兑底、低于最小时长跳过、设备默认 CPU、provider 使用配置设备）。
+
+## 2026-10-19：llama.cpp Q8 后端切换排障
+
+`ASR_ENGINE=llamacpp` 时 ASR 走托管 `llama-server` 子进程，模型/二进制/日志如下：
+
+- 模型：`/data1/models/Confucius4-R2T2-GGUF/Confucius4-R2T2-Q8_0.gguf` + `mmproj-Confucius4-R2T2-Q8_0.gguf`
+- 二进制：`/data1/www/llama.cpp/build/bin/llama-server`（`QWEN_LLAMACPP_SERVER_BIN`）
+- 日志：`/tmp/qwen3-asr-llamacpp-server.log`
+
+常见问题：
+
+1. **启动即失败 `llama.cpp Q8 backend requirement missing`**：模型/mmproj/二进制路径不存在，检查 `.env` 的 `QWEN_LLAMACPP_*`。
+2. **首次请求慢（3~5s）**：`llama-server` 在首个识别请求时才启动并加载 Q8（约 2~4s），之后常驻；属预期。
+3. **端口被占用**：`QWEN_LLAMACPP_PORT`（默认 18090）冲突时改端口，或设为 `0` 自动选择空闲端口。
+4. **词级时间戳首次约 27s / 日志报 `KV cache insufficient`**：Q8 主模型常驻约 4GB，aligner 沿用 0.2 会 KV 不足；代码已保底 `gpu_memory_utilization=0.35`，仍不足会自动 +0.1/+0.2 重试。若显存紧张可先不启用 `word_timestamps`。
+5. **流式首段文本缺失/错乱**：确认已包含「段内有效语音 ≥0.8s 才落定」的修复（本次提交）；音频开头长静音不会再产生极短误识别段。
+6. **回滚**：`.env` 改回 `ASR_ENGINE=vllm`（或删除）→ `sudo systemctl restart qwen3-asr`，vLLM 路径未改动。

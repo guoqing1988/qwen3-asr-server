@@ -62,7 +62,7 @@ Qwen3-ASR 服务（GPU 版）：Confucius4-R2T2（vLLM bf16 默认，可选 llam
 
 `ASR_ENGINE=vllm`（默认）/ `llamacpp`，开关键在 `.env`，对外 API 与返回结构不变（含 `segments[].start/end`；`word_timestamps` 默认关，开启时返回 `words` 与真实时间）。
 
-- **llamacpp**：官方 Q8 GGUF（`/data1/models/Confucius4-R2T2-GGUF/`）+ 托管 `llama-server` 子进程（`app/services/asr/qwen3_llamacpp.py`）；ASR 显存约 4GB（vLLM 约 8.3GB），离线/流式/长音频/说话人分离全支持；单次音频上限约 60s，后端内部按 `QWEN_LLAMACPP_MAX_SEGMENT_SEC`（25s）切段；流式每 1s 用累积音频全量重解码（append-only prefix 在 llama.cpp 上不稳定），词级时间戳复用 `Qwen3-ForcedAligner-0.6B`；aligner 显存不足会自动提高 util 重试。
+- **llamacpp**：官方 Q8 GGUF（`/data1/models/Confucius4-R2T2-GGUF/`）+ 托管 `llama-server` 子进程（`app/services/asr/qwen3_llamacpp.py`）；ASR 显存 **4.1GB**（vLLM 约 8.3GB），离线/流式/长音频/说话人分离全支持；单次音频上限约 60s，后端内部按 `QWEN_LLAMACPP_MAX_SEGMENT_SEC`（25s）切段；流式每 1s 用累积音频全量重解码（append-only prefix 在 llama.cpp 上不稳定），段内有效语音 <0.8s 不落定；词级时间戳复用 `Qwen3-ForcedAligner-0.6B`，aligner util 保底 0.35（否则 KV cache 不足会白等约 90s）。生产实测：离线 40s 1.2s、流式 40s 首字 3.7s/3 段、词级首次 27s（17 words）、词级峰值约 10.6GB 且空闲 25s 回落至 4.5GB。
 - **回滚**：`.env` 改回 `ASR_ENGINE=vllm`（或删除）重启即可。
 
 ## 引擎容错与显存策略（已实现）

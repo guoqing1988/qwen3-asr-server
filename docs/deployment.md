@@ -304,8 +304,18 @@ vLLM 引擎初始化在特定宿主环境（如 CPU 电压不稳、驱动兼容�
 `ASR_ENGINE=llamacpp` 时改用官方 Q8 GGUF，通过托管 `llama-server` 子进程推理，对外 API、输出结构与 vLLM 后端完全一致：
 
 - 离线、长音频、说话人分离、声纹、WebSocket 流式、two-pass 均可用；
-- ASR 显存约 **4GB**（vLLM bf16 约 8.3GB），单卡可与 CAM++（约 1GB）共存；
+- ASR 显存约 **4.1GB**（vLLM bf16 约 8.3GB），单卡可与 CAM++（约 1GB）共存；
 - `word_timestamps=true` 仍使用 `Qwen3-ForcedAligner-0.6B`（懒加载，单独占显存）。
+
+**实测（RTX 4090，生产 18109，Q8）**：
+
+| 场景 | 结果 |
+|------|------|
+| 离线 10s（首次请求，含 llama-server 启动） | 3.2s，热词 `gpt` 正确 |
+| 离线 40s（热态） | 1.2s，`speaker`/`segments` 正常 |
+| 词级时间戳（首次，含 aligner 加载） | 27s，17 words，时间合理 |
+| 流式 40s（160ms 帧） | 首字 3.7s（前 4s 静音）、3 段、最终文本正确 |
+| 显存 | llama-server 约 4.1GB；词级峰值约 10.6GB，空闲 25s 后回落至 4.5GB |
 
 **准备模型与二进制**：
 
@@ -336,7 +346,8 @@ QWEN_LLAMACPP_CTX=8192
 
 - llama.cpp 单次音频编码上限约 60s，后端内部按 `QWEN_LLAMACPP_MAX_SEGMENT_SEC`（默认 25s）切段后拼接文本；
 - 流式改为**每 1s 用累积音频全量重解码**（首轮 0.32s）：llama-server 的 append-only prefix 续写在短音频上不稳定，全量重解码保证文本不倒退，20s 音频每轮约 0.3s；
-- 词级时间戳的 aligner 若因同卡显存不足启动失败，会自动提高 `gpu_memory_utilization` 重试（+0.1 / +0.2）。
+- 流式段内有效语音不足 0.8s 时不落定（合并到下一段），避免开头长静音导致极短段被误识别；
+- 词级时间戳的 aligner `gpu_memory_utilization` 保底 **0.35**（Q8 主模型常驻约 4GB，沿用 vLLM 的 0.2 会因 KV cache 不足白等约 90s）；仍不足时自动 +0.1 / +0.2 重试。
 
 **回滚**：把 `ASR_ENGINE` 改回 `vllm`（或删除该行）并重启即可，vLLM 代码路径未改动。
 

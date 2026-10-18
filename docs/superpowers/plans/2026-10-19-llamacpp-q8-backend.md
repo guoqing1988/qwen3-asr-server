@@ -61,21 +61,42 @@
   - 进程管理（健康检查、240s 启动等待、`shutdown` 终止）
   - 离线/`transcribe_array`/`transcribe_batch`/`transcribe_raw`，>25s 自动切段
   - 流式：首轮 0.32s，之后每 1s 用累积音频全量重解码（保证文本不倒退）
-  - 词级时间戳：独立加载 forced aligner，显存不足自动提高 util 重试
+  - 词级时间戳：独立加载 forced aligner，util 保底 0.35，仍不足则 +0.1/+0.2 重试
 - `app/services/asr/qwen3_engine.py`：`llamacpp` 分支接入 `transcribe_*`、批量、流式、unload、aligner 生命周期
 - `app/core/config.py` + `.env.example`：`ASR_ENGINE`、`QWEN_LLAMACPP_*`
 - 文档：`docs/deployment.md`（Q8 部署/回滚）、`CLAUDE.md`
 
-### 实测（RTX 4090，GPU3）
+### 实测（RTX 4090）
+
+开发阶段（GPU3，临时实例）：
 
 | 场景 | 结果 |
 |---|---|
 | 离线 40s 英文（热词 GPT） | 1.5s，`gpt` 正确 |
 | 离线 80s（内部 25s 切段） | 1.6s |
 | 流式 20s（160ms 帧，每 1s 重解码） | 总耗时 3.5s，每轮约 0.3s，文本持续增长不倒退 |
-| 词级时间戳（10s） | 结构一致，17 words，时间合理；aligner 加载约 25s（含重试） |
+| 词级时间戳（10s） | 结构一致，17 words，时间合理 |
 | 说话人分离（52s 对话） | 2 段，说话人1/2 正确，走 `transcribe_long_audio` + `_transcribe_batch` |
 | ASR 显存 | llama-server 约 4.1GB（vLLM bf16 约 8.3GB） |
+
+生产切换验证（18109，`ASR_ENGINE=llamacpp`，真实 HTTP/WS）：
+
+| 场景 | 结果 |
+|---|---|
+| `/v1/models` | 200，`qwen3-asr-confucius4-r2t2` |
+| 离线 10s（首请求，含 llama-server 启动） | 3.19s，热词 `gpt` 正确 |
+| 离线 40s | 1.20s，`speaker=说话人1`，`segments` 正常 |
+| 词级时间戳（10s） | 26.96s（首次含 aligner 加载），17 words |
+| 流式 40s（160ms 帧） | 首字 3.68s（前 4s 静音）、3 段、`full_text` 正确 |
+| 显存 | ASR 4.1GB；词级峰值约 10.6GB，空闲 25s 后回落至 4.5GB |
+| 日志 | 0 ERROR |
+
+### 切换过程中修复的问题
+
+1. `Qwen3ASREngine.supports_realtime` 未包含 `llamacpp`，WebSocket 连接被拒绝 → 已加入。
+2. 音频开头长静音时 FireRedVAD 立即报句尾，产生 <1s 的极短段并被误识别（`ttranscribe and gbt`）→ 现在段内有效语音 ≥0.8s 才落定，vLLM 路径同样受益。
+3. Q8 aligner 沿用 vLLM 的 `gpu_memory_utilization=0.2` 会因 KV cache 不足空等约 90s → 保底 0.35。
+4. 流式 append-only prefix 在 llama.cpp 上不稳定（英文单词被字符级回滚切断）→ 改为每 1s 全量重解码。
 
 ### 已知差异
 
