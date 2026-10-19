@@ -315,7 +315,8 @@ curl -X POST "http://localhost:9101/v1/audio/transcriptions" \
 | `/stream/v1/asr/health` | GET       | 健康检查               |
 | `/ws/v1/asr`            | WebSocket | 流式语音识别（阿里云协议兼容） |
 | `/ws/v1/asr/funasr`     | WebSocket | FunASR 流式识别（向后兼容）   |
-| `/ws/v1/asr/qwen`       | WebSocket | Qwen3-ASR 流式识别 |
+| `/ws/v1/asr/qwen`       | WebSocket | **已废弃**（返回 `endpoint_deprecated`）|
+| `/v1/realtime`          | WebSocket | 标准 OpenAI Realtime 转录（`intent=transcription`）|
 
 **请求参数:**
 
@@ -369,15 +370,16 @@ curl -X POST "http://localhost:9101/stream/v1/asr?enable_speaker_diarization=tru
 
 ### WebSocket 流式接口
 
-`/ws/v1/asr` 下提供三个 WebSocket 端点：
+提供两类 WebSocket 端点：
 
 | 端点 | 后端 | 说明 |
 |------|------|------|
+| `/v1/realtime` | Qwen3-ASR（R2T2，vLLM / llama.cpp Q8） | **推荐**：标准 OpenAI Realtime transcription 协议，多语言 |
 | `/ws/v1/asr` | FunASR realtime（Paraformer） | 阿里云协议兼容，中文流式 + 实时标点 |
 | `/ws/v1/asr/funasr` | FunASR realtime | 上述端点的向后兼容别名 |
-| `/ws/v1/asr/qwen` | Qwen3-ASR（vLLM） | Qwen3 流式，多语言（中/英/日等） |
+| `/ws/v1/asr/qwen` | — | **已废弃**：连接后返回 `endpoint_deprecated` 并关闭（close code 1008），请改用 `/v1/realtime` |
 
-三个端点都是**实时语音转录**——音频增量发送，说话的同时返回增量结果。
+这些端点都是**实时语音转录**——音频增量发送，说话的同时返回增量结果。
 这与离线 HTTP 接口有本质区别：
 
 | | WebSocket（实时） | HTTP 离线（`/v1/*`、`/stream/v1/asr`） |
@@ -395,47 +397,66 @@ curl -X POST "http://localhost:9101/stream/v1/asr?enable_speaker_diarization=tru
 鉴权：浏览器端 WebSocket 无法发送自定义请求头，通过查询参数传 API key
 （`?token=YOUR_KEY` 或 `x_nls_token`）；未配置 `API_KEY` 时免鉴权。
 
-**Qwen3 流式协议**（`/ws/v1/asr/qwen`）——JSON 控制消息 + 二进制音频帧：
+**OpenAI Realtime 转录协议**（`/v1/realtime`）——标准 OpenAI Realtime
+WebSocket 子集（`intent=transcription`），识别复用 Qwen3-ASR 流式引擎。
 
-1. 连接后发送 `start`：
-   ```json
-   {"type": "start", "payload": {
-     "format": "pcm",              // "pcm" 或 "wav"
-     "sample_rate": 16000,
-     "language": "zh",             // 可选，自动检测
-     "context": "",                // 热词上下文（与 ASR_DEFAULT_HOTWORDS 合并）
-     "enable_inverse_text_normalization": true,
-     "chunk_size_sec": 0.16,      // 解码粒度（官方推荐 160ms）
-     "lookahead_sec": 0.16,       // 首 chunk 额外音频
-     "unfixed_chunk_num": 0,
-     "unfixed_token_num": 1
-   }}
-   ```
-2. 服务器回 `started`（带生效参数）
-3. 持续发送二进制音频帧（16kHz int16 PCM 或 WAV 字节）
-4. 服务器增量返回 `segment_start` / `segment_end`，`segment_end` 携带累计
-   全文（`result.text`）和已确认文本列表
-5. 发送 `{"type": "stop"}` 结束；错误以 `{"type": "error", ...}` 返回
+鉴权（三选一）：`Authorization: Bearer <API_KEY>`、查询参数 `?token=<API_KEY>`、
+或子协议 `openai-insecure-api-key.<API_KEY>`；未配置 `API_KEY` 时免鉴权。
+握手成功回 `Sec-WebSocket-Protocol: realtime`。
+
+客户端事件：
+
+| 事件 | 说明 |
+|------|------|
+| `session.update` | 设置 `audio.input.format.rate`（16000/24000）、`audio.input.transcription.{model,prompt,language,keywords}`、`audio.input.turn_detection`（`null` 或 `{"type":"server_vad"}`） |
+| `input_audio_buffer.append` | `audio` 为 base64 的 PCM16 little-endian；单次 ≤10s |
+| `input_audio_buffer.commit` | 手动落定当前段（`turn_detection: null` 时必须） |
+| `input_audio_buffer.clear` | 丢弃未提交音频 |
+
+服务端事件：`session.created` / `session.updated`、
+`conversation.item.input_audio_transcription.delta`（增量文本，拼接即全文）、
+`.completed`（`transcript` 为定稿全文，含标点/ITN 与 two-pass 重转修正）、
+`.failed`、`input_audio_buffer.committed`、`input_audio_buffer.cleared`、`error`。
+
+`turn_detection: {"type":"server_vad"}` 时由 FireRedVAD 在句尾静音自动落定
+（连续讲话按 `QWEN_STREAM_SEGMENT_MAX_SEC`，默认 60s 兜底），无需客户端
+commit；`turn_detection: null` 时整段由客户端 commit 触发落定。
+采样率、chunk 粒度、热词等解码参数由服务端 `.env`（`QWEN_STREAM_*`）控制。
 
 Python 示例：
 
 ```python
-import asyncio, json, websockets
+import asyncio, base64, json, websockets
 
 async def main():
-    async with websockets.connect(
-        "ws://localhost:9101/ws/v1/asr/qwen?token=YOUR_API_KEY"
-    ) as ws:
-        await ws.send(json.dumps({"type": "start", "payload": {"format": "pcm"}}))
+    uri = "ws://localhost:9101/v1/realtime?token=YOUR_API_KEY&intent=transcription"
+    async with websockets.connect(uri, subprotocols=["realtime"]) as ws:
+        print(json.loads(await ws.recv()))  # session.created
+        await ws.send(json.dumps({
+            "type": "session.update",
+            "session": {"audio": {"input": {
+                "format": {"type": "audio/pcm", "rate": 16000},
+                "transcription": {"model": "qwen3-asr", "prompt": "Bloomberg, 周树门"},
+                "turn_detection": {"type": "server_vad"},
+            }}}
+        }))
         with open("audio.wav", "rb") as f:
             f.read(44)  # 跳过 WAV 头
-            while chunk := f.read(3200):  # 16kHz int16，0.1s 一帧
-                await ws.send(chunk)
-        await ws.send(json.dumps({"type": "stop"}))
-        async for raw in ws:
-            msg = json.loads(raw)
-            if msg.get("type") == "segment_end":
-                print(msg["result"]["text"])
+            while chunk := f.read(3200):  # 16kHz int16，0.1s
+                await ws.send(json.dumps({
+                    "type": "input_audio_buffer.append",
+                    "audio": base64.b64encode(chunk).decode(),
+                }))
+                await asyncio.sleep(0.1)
+                while True:  # 持续读取事件（否则服务端会积压）
+                    try:
+                        event = json.loads(await asyncio.wait_for(ws.recv(), 0.001))
+                    except asyncio.TimeoutError:
+                        break
+                    if event["type"].endswith(".delta"):
+                        print(event["delta"], end="", flush=True)
+                    elif event["type"].endswith(".completed"):
+                        print("\n[segment]", event["transcript"])
 
 asyncio.run(main())
 ```
@@ -449,28 +470,35 @@ asyncio.run(main())
 `enable_itn` 等参数。
 
 **实时行为**（Qwen3 路径）：真正的实时识别。每个音频 chunk（默认 160ms）
-增量解码后立即推送 `type: "result"`（`is_partial: true`），客户端可渲染
-实时字幕；FireRedVAD 检测到句尾静音（或单段达到 `QWEN_STREAM_SEGMENT_MAX_SEC`
-兜底）时推送 `segment_end` 确认文本。段间无重叠、无字符去重，文本自然拼接。
+增量解码后立即推送 `conversation.item.input_audio_transcription.delta`，
+客户端拼接 delta 即得实时字幕；FireRedVAD 检测到句尾静音（或单段达到
+`QWEN_STREAM_SEGMENT_MAX_SEC` 兜底）时推送 `.completed` 定稿文本。段间无重叠、
+无字符去重，文本自然拼接。以下解码参数由服务端 `.env` 控制（客户端不可覆盖），
 延迟调优：
 
-| 参数 | 默认 | 作用 |
+| 环境变量 | 默认 | 作用 |
 |------|------|------|
-| `chunk_size_sec` | 0.16 | 解码粒度/出字延迟，官方推荐 160ms（80ms~2s） |
-| `lookahead_sec` | 0.16 | 首 chunk 额外音频，帮助首段判断语言/专名 |
-| `unfixed_token_num` | 1 | 句尾回滚修正 token 数（官方默认 1） |
-| `unfixed_chunk_num` | 0 | 前 N 个 chunk 不接历史 prefix（官方默认 0） |
-| `max_new_tokens` | 512 | 生成**上限**，实际按 chunk 时长动态取小值；0 表示不设上限 |
+| `QWEN_STREAM_CHUNK_SEC` | 0.16 | 解码粒度/出字延迟，官方推荐 160ms（80ms~2s） |
+| `QWEN_STREAM_LOOKAHEAD_SEC` | 0.16 | 首 chunk 额外音频，帮助首段判断语言/专名 |
+| `QWEN_STREAM_UNFIXED_TOKEN_NUM` | 1 | 句尾回滚修正 token 数（官方默认 1） |
+| `QWEN_STREAM_UNFIXED_CHUNK_NUM` | 0 | 前 N 个 chunk 不接历史 prefix（官方默认 0） |
+| `QWEN_STREAM_MAX_NEW_TOKENS` | 512 | 生成**上限**，实际按 chunk 时长动态取小值；0 表示不设上限 |
+| `QWEN_STREAM_SEGMENT_MAX_SEC` | 60 | 连续讲话无静音时的强制落定上限 |
+| `QWEN_STREAM_FINAL_PASS` | true | 段定稿时用离线路径重转校正专名 |
 
 > **`max_new_tokens` 说明**：采用官方 R2T2 算法，每轮生成量约为
 > `(chunk + lookahead) / 1280 * 2`（160ms chunk 约 8 个 token），
 > 配置值仅作硬上限，不再是「整段文本上限」。低延迟靠 `chunk_size_sec` 与
 > 动态上限共同保证。
 >
-> **热词/上下文**：`context` 现在按官方约定直接作为 system prompt（不再包
+> **热词/上下文**：`session.update` 的 `transcription.prompt` / `keywords`
+> 与 `ASR_DEFAULT_HOTWORDS` 合并后按官方约定直接作为 system prompt（不再包
 > "Transcribe the speech..." 指令），离线与流式共用；流式为 append-only，
 > 首段已输出文本无法回改，段定稿时可用 `QWEN_STREAM_FINAL_PASS=true`
 > 走离线路径重转校正专名。
+>
+> **delta 单调性**：流式 partial 关闭 ITN（避免 `一`→`1` 这类改写破坏
+> 增量拼接），`.completed` 的 `transcript` 才做 ITN 与标点规范化。
 
 **流式限制**：
 - 两条路径都不返回词级时间戳
@@ -524,7 +552,7 @@ asyncio.run(main())
 - 音频入口固定保留最多 10 秒待处理数据；队列满时会对 WebSocket 发送端施加背压，不会静默丢弃音频。客户端应持续读取识别事件并增量发送。
 - 该路径使用 Paraformer，离线接口使用 Qwen3-ASR；应在同一路径内比较延迟，不能直接比较两者总吞吐。
 
-**Qwen3-ASR 流式**（使用 `/ws/v1/asr/qwen`）：
+**Qwen3-ASR 流式**（使用 `/v1/realtime`，标准 OpenAI Realtime 协议）：
 - ✅ 支持多语言实时识别
 - ✅ 当前支持 CUDA vLLM 与 CPU Rust 两条流式路径
 - ❌ 当前流式路径不返回词级时间戳
@@ -565,7 +593,7 @@ asyncio.run(main())
 
 | 模型 | 大小 | 渠道与路径 | 用途 |
 |------|------|-----------|------|
-| Confucius4-R2T2 | ~3.9GB | 本地：`/data1/models/Confucius4-R2T2` | **默认**离线转写、`/ws/v1/asr/qwen` 流式（多语言） |
+| Confucius4-R2T2 | ~3.9GB | 本地：`/data1/models/Confucius4-R2T2` | **默认**离线转写、`/v1/realtime` 流式（多语言） |
 | Qwen3-ForcedAligner 0.6B | ~1.8GB | 本地：`/data1/models/Qwen3-ForcedAligner-0.6B` | 词级时间戳（离线 `word_timestamps=true`，懒加载） |
 | Paraformer Large | ~849MB | MS：`/data1/models/modelscope/hub/models/iic/speech_paraformer-large_...` | `/ws/v1/asr` + `/ws/v1/asr/funasr`（中文实时流式） |
 | 标点（离线） | ~300MB | MS：`/data1/models/modelscope/hub/models/iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch` | 离线/流式标点 |
@@ -589,8 +617,9 @@ asyncio.run(main())
 | `POST /v1/audio/transcriptions` | qwen3-asr-confucius4-r2t2 |
 | `POST /stream/v1/asr` | qwen3-asr-confucius4-r2t2 |
 | `GET /v1/models`、`health`、`/stream/v1/asr/models` | 只读查询，不跑推理 |
-| `/ws/v1/asr/qwen` | qwen3-asr-confucius4-r2t2 |
+| `/v1/realtime` | qwen3-asr-confucius4-r2t2 |
 | `/ws/v1/asr`、`/ws/v1/asr/funasr` | paraformer-large（中文实时） |
+| `/ws/v1/asr/qwen` | 已废弃，返回 `endpoint_deprecated` |
 
 所有 HTTP 转写接口共用默认离线模型（`qwen3-asr-confucius4-r2t2`，可用
 `QWEN3_ASR_MODEL=qwen3-asr-0.6b` 覆盖）；Paraformer 只服务于两个

@@ -65,6 +65,15 @@ Qwen3-ASR 服务（GPU 版）：Confucius4-R2T2（vLLM bf16 默认，可选 llam
 - **llamacpp**：官方 Q8 GGUF（`/data1/models/Confucius4-R2T2-GGUF/`）+ 托管 `llama-server` 子进程（`app/services/asr/qwen3_llamacpp.py`）；ASR 显存 **4.1GB**（vLLM 约 8.3GB），离线/流式/长音频/说话人分离全支持；单次音频上限约 60s，后端内部按 `QWEN_LLAMACPP_MAX_SEGMENT_SEC`（25s）切段；流式默认 append-only（`QWEN_LLAMACPP_STREAM_MODE=append`，移植 T8 协议：token 级回滚 + stable 落后候选 1 token + 回撤候选整轮丢弃 + 首轮静音跳过），实测 3m44s 16 段 0 回撤；`redecode` 可回退为每 1s 全量重解码；段内有效语音 <0.8s 不落定；词级时间戳复用 `Qwen3-ForcedAligner-0.6B`，aligner util 保底 0.35（否则 KV cache 不足会白等约 90s）。生产实测：离线 40s 1.2s、流式 40s 首字 3.7s/3 段、词级首次 27s（17 words）、词级峰值约 10.6GB 且空闲 25s 回落至 4.5GB。
 - **回滚**：`.env` 改回 `ASR_ENGINE=vllm`（或删除）重启即可。
 
+## 实时接口（OpenAI Realtime）
+
+- 对外的实时端点统一为 **`ws /v1/realtime`**（`intent=transcription`，OpenAI Realtime transcription 子集），实现在 `app/services/asr/openai_realtime.py` + `app/api/v1/realtime.py`；识别复用 `Qwen3ASREngine` 流式接口、FireRedVAD 断句、two-pass 定稿与热词合并
+- 客户端事件：`session.update`（`format.rate` 16k/24k、`transcription.{prompt,language,keywords}`、`turn_detection` 为 `null` 或 `server_vad`）、`input_audio_buffer.append`（base64 PCM16，单次 ≤10s）、`commit`、`clear`
+- 服务端事件：`session.created/updated`、`conversation.item.input_audio_transcription.delta/completed/failed`、`input_audio_buffer.committed/cleared`、`error`
+- 鉴权：`Authorization: Bearer`、`?token=`、子协议 `openai-insecure-api-key.<key>`；握手回 `subprotocol=realtime`
+- 流式 partial **关闭 ITN**（保证 delta 单调，避免 `一`→`1` 改写前缀），`.completed` 才做 ITN/标点；`server_vad` 模式句尾静音自动落定，连续讲话按 `QWEN_STREAM_SEGMENT_MAX_SEC`（60s）兜底
+- **`ws /ws/v1/asr/qwen` 已废弃**：连接后返回 `{"type":"error","error":{"code":"endpoint_deprecated"}}` 并 `close(1008)`；`/ws/v1/asr`、`/ws/v1/asr/funasr`（FunASR 阿里云协议）保持不变
+
 ## 引擎容错与显存策略（已实现）
 
 - **懒加载自动重试**：引擎创建失败重试 3 次（间隔 5s/10s）

@@ -434,4 +434,8 @@ load=11.0s → before-sleep infer ok → sleep=3.7s（释放 6.45GiB）→ wake=
 11. **第二次 `word_timestamps` 请求卡死不返回**：aligner 空闲 15s 会被 `sleep_aligner` 休眠归还显存；休眠状态下 `encode` 会挂起（实测 >300s 无响应）。`_get_aligner()` 与 `align_transcript()` 现在都会在 encode 前检测 `_aligner_sleeping` 并 `wake_up()`，实测唤醒后第二次请求 21s、第三次 0.7s 正常。
 12. **partial 文本前缀看似"回撤"（`不是三` → `不是33`、`退休的七` → `退休的70`）**：这是 ITN 数字规范化在文本增长后改写了已发布前缀（既有行为，vLLM 路径相同），不是识别回撤；如需绝对单调应按 `current_segment_text` 的定稿结果展示或关闭数字规范化。
 13. **非法音频返回 400 而非 500**：`normalize_audio_for_asr` / `convert_audio_to_wav` 失败属客户端输入问题，已改为 `InvalidParameterException`（HTTP 400），OpenAI 兼容接口同时新增 `APIException` → 状态码映射。
-14. **回滚**：`.env` 改回 `ASR_ENGINE=vllm`（或删除）→ `sudo systemctl restart qwen3-asr`，vLLM 路径未改动。
+14. **`/ws/v1/asr/qwen` 连接后立刻收到 `endpoint_deprecated` 并被关闭（1008）**：该自定义协议端点已废弃，改用标准 `ws /v1/realtime?intent=transcription`（OpenAI Realtime transcription 子集）；事件映射见 README「OpenAI Realtime 转录协议」。
+15. **新 `/v1/realtime` 握手返回 403**：鉴权失败。优先用 `Authorization: Bearer <API_KEY>` 或 `?token=<API_KEY>`；浏览器可用子协议 `openai-insecure-api-key.<API_KEY>`。未配置 `API_KEY` 时免鉴权。
+16. **`delta` 拼接后与 `.completed` 文本略有差异**：预期行为。delta 走流式 append-only 且**关闭 ITN**（保证增量单调），`.completed` 才对定稿文本做 ITN/标点，并在 `QWEN_STREAM_FINAL_PASS=true` 时用离线路径重转（专名更准）。
+17. **`server_vad` 模式下长时间没有 `.completed`**：连续讲话无静音时不会落定，达到 `QWEN_STREAM_SEGMENT_MAX_SEC`（默认 60s）会强制落定；若仍不落定，检查音频是否有有效语音（段内有效语音 <0.8s 不落定）以及 FireRedVAD 模型是否加载成功。
+18. **回滚**：`.env` 改回 `ASR_ENGINE=vllm`（或删除）→ `sudo systemctl restart qwen3-asr`，vLLM 路径未改动。

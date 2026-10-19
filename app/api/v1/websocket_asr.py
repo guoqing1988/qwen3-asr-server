@@ -3,12 +3,10 @@
 
 import logging
 import time
-import uuid
 from typing import Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from ...services.qwen3_websocket_asr import Qwen3ASRService
 from ...services.websocket_asr import AliyunWebSocketASRService
 
 logger = logging.getLogger(__name__)
@@ -32,14 +30,24 @@ async def funasr_websocket(websocket: WebSocket) -> None:
         await service.cleanup()
 
 
-_qwen3_service = Qwen3ASRService()
-
-
 @router.websocket("/qwen")
 async def qwen_asr_websocket(
     websocket: WebSocket,
     task_id: Optional[str] = None,
 ) -> None:
-    if task_id is None:
-        task_id = str(uuid.uuid4())[:8]
-    await _qwen3_service.handle_connection(websocket, task_id)
+    """已废弃：改用标准 OpenAI Realtime 端点 `ws /v1/realtime`。"""
+    _ = task_id
+    await websocket.accept()
+    await websocket.send_json(
+        {
+            "type": "error",
+            "error": {
+                "code": "endpoint_deprecated",
+                "message": (
+                    "ws /ws/v1/asr/qwen 已废弃，请改用 ws /v1/realtime"
+                    "（OpenAI Realtime transcription 协议，intent=transcription）"
+                ),
+            },
+        }
+    )
+    await websocket.close(code=1008)
