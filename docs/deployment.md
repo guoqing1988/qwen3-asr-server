@@ -582,7 +582,7 @@ context..." 指令；强制语言时在生成提示后追加 `language X<asr_tex
 官方写法输出 `gpt`（热词生效）。
 
 **合并规则**：离线（`/v1/audio/transcriptions` 的 `prompt`、`/stream/v1/asr` 的
-`vocabulary_id`）与流式（`/ws/v1/asr/qwen` 的 `context`）都按
+`vocabulary_id`）与流式（`/v1/realtime` 的 `transcription.prompt` / `keywords`）都按
 `merge_hotwords(ASR_DEFAULT_HOTWORDS, 请求热词)` 合并：默认词在前、去重、保留短语内空格。
 
 **流式热词限制**：流式为 append-only，首段一旦输出错误（如 `gbt`）后续不会改写。
@@ -763,3 +763,13 @@ docker pull quantatrisk/qwen3-asr:cpu-latest
 # 重启服务
 docker compose down && docker compose up -d
 ```
+
+## 离线句末标点与分段边界（2026-10-19）
+
+- `ASR_RESTORE_SENTENCE_ENDING`（默认 `true`）：离线结果缺句末标点时，用 FunASR
+  CT-Transformer（`PUNC_MODEL`，CPU）补一个标点。只补标点，不改写正文（标点模型会
+  改空格/数字写法，这里只取最后一个标点）；缺失段 <1 条时不加载模型；模型异常仅告警。
+- 分段修复：`MAX_SEGMENT_SEC` 是硬上限，超长段会按低能量点/固定时长切分；末尾不足
+  最小时长的残段并入前段，不再丢弃（丢尾音会导致最后一句识别缺失）。
+- 如需完全保留 R2T2 原始输出（不加任何标点），设
+  `ASR_RESTORE_SENTENCE_ENDING=false` 后重启；无其他 API 结构变化。

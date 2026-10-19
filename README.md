@@ -538,9 +538,10 @@ asyncio.run(main())
 长音频自动分段处理：
 
 1. **VAD 语音检测** - 检测语音边界，过滤静音
-2. **贪婪合并** - 累积语音段，确保每段不超过 `MAX_SEGMENT_SEC`（默认60秒）
-3. **静音切分** - 语音段间静音超过3秒时强制切分，避免包含过长静音
-4. **批处理推理** - 多片段并行处理，GPU 模式下性能提升 2-3 倍
+2. **贪婪合并** - 短片段与相邻段合并，同段不超过 `MAX_SEGMENT_SEC`（默认60秒）
+3. **有界切分不丢尾音** - 超长段按低能量点或固定时长切分，末尾残段并入前段（不会因不足最小时长被丢弃）
+4. **句末标点补齐** - R2T2 在段尾被截断时通常不给标点，离线结果会用 FunASR 标点模型补一个句末标点（`ASR_RESTORE_SENTENCE_ENDING=true`，只补标点、不改写正文）
+5. **批处理推理** - 多片段并行处理，GPU 模式下性能提升 2-3 倍
 
 ### WebSocket 流式识别限制
 
@@ -694,6 +695,7 @@ curl -X DELETE 'http://localhost:9101/api/v1/voiceprint-speakers/{speaker_id}'
 | `QWEN_FORCE_ALIGNER_MAX_MODEL_LEN` | - | forced aligner 的 `max_model_len`（本项目设 `2048`） |
 | `QWEN_FORCED_ALIGNER_ENABLED` | `true` | 是否启用 forced aligner（`false` 则词级时间戳不可用） |
 | `QWEN_WARMUP_FORCED_ALIGNER` | `false` | 是否在启动时预热 aligner。`false` 时改为首次 `word_timestamps=true` 请求才懒加载（启动显存 16GB → 6GB 的关键） |
+| `ASR_RESTORE_SENTENCE_ENDING` | `true` | 离线结果缺句末标点时用 FunASR CT-Transformer 补一个（仅补标点，不改写正文） |
 | `QWEN_STREAM_CHUNK_SEC` | `0.16` | 流式解码粒度（秒），官方 R2T2 推荐 80ms~2s；决定出字延迟 |
 | `QWEN_STREAM_LOOKAHEAD_SEC` | `0.16` | 首个 chunk 额外音频（秒），帮助首段判断语言/专名 |
 | `QWEN_STREAM_UNFIXED_CHUNK_NUM` | `0` | 前 N 个 chunk 不接历史 prefix（官方默认 0） |

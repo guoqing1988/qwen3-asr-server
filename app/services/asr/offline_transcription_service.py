@@ -107,6 +107,15 @@ class OfflineTranscriptionService:
                 task_id=options.task_id,
             )
         )
+        if settings.ASR_RESTORE_SENTENCE_ENDING and result.segments:
+            from .punctuation import restore_sentence_endings
+
+            originals = [segment.text for segment in result.segments]
+            restored = restore_sentence_endings(originals)
+            if restored != originals:
+                for segment, text in zip(result.segments, restored):
+                    segment.text = text
+                result.text = "\n".join(restored)
         if not settings.VOICEPRINT_ENABLED:
             return result
 

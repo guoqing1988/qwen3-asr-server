@@ -54,7 +54,7 @@
   - `/stream/v1/asr`
   - `/v1/audio/transcriptions`
   - `/ws/v1/asr/funasr`
-  - `/ws/v1/asr/qwen`
+  - `ws /v1/realtime`（原 `/ws/v1/asr/qwen`，已废弃）
 
 ## 手工 Smoke Plan
 
@@ -63,4 +63,4 @@
 1. `POST /stream/v1/asr`，使用小 WAV request body，确认返回 `result`、`segments`、`duration`、`processing_time`。
 2. `POST /v1/audio/transcriptions`，使用 multipart `file` 和 `response_format=verbose_json`，确认返回 OpenAI 风格 `text` 和 `segments`。
 3. 连接 `/ws/v1/asr/funasr`，发送阿里兼容 start/audio/stop 消息，确认 sentence 事件仍正常返回。
-4. 连接 `/ws/v1/asr/qwen`，发送 start/audio/stop 消息，确认 partial/final 事件仍正常返回。
+4. 连接 `ws /v1/realtime?intent=transcription`，发送 session.update + append/commit，确认 delta/completed 事件正常返回。

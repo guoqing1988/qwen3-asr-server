@@ -77,6 +77,9 @@ class Settings:
     # 服务端预设热词（英文逗号分隔，与请求热词合并后注入识别上下文；建议 ≤512 字符）
     ASR_DEFAULT_HOTWORDS: str = ""
 
+    # 离线转写后补句末标点（R2T2 段尾常缺标点；复用 FunASR 标点模型）
+    ASR_RESTORE_SENTENCE_ENDING: bool = True
+
     # 音频分段配置
     MAX_SEGMENT_SEC: float = 60.0  # Max offline ASR segment duration in seconds.
 
@@ -226,6 +229,13 @@ class Settings:
         self.ASR_DEFAULT_HOTWORDS = (
             os.getenv("ASR_DEFAULT_HOTWORDS") or ""
         ).strip()
+
+        self.ASR_RESTORE_SENTENCE_ENDING = (
+            os.getenv("ASR_RESTORE_SENTENCE_ENDING", str(self.ASR_RESTORE_SENTENCE_ENDING))
+            .strip()
+            .lower()
+            not in {"0", "false", "no", "off"}
+        )
 
         self.MAX_SEGMENT_SEC = float(
             os.getenv("MAX_SEGMENT_SEC", str(self.MAX_SEGMENT_SEC))

@@ -315,7 +315,8 @@ curl -X POST "http://localhost:9101/v1/audio/transcriptions" \
 | `/stream/v1/asr/health` | GET | Health check |
 | `/ws/v1/asr` | WebSocket | Streaming ASR (Alibaba Cloud protocol compatible) |
 | `/ws/v1/asr/funasr` | WebSocket | FunASR streaming (backward compatible) |
-| `/ws/v1/asr/qwen` | WebSocket | Qwen3-ASR streaming |
+| `/ws/v1/asr/qwen` | WebSocket | **Deprecated** (returns `endpoint_deprecated`) |
+| `/v1/realtime` | WebSocket | Standard OpenAI Realtime transcription (`intent=transcription`) |
 
 **Request Parameters:**
 
@@ -369,15 +370,16 @@ curl -X POST "http://localhost:9101/stream/v1/asr?enable_speaker_diarization=tru
 
 ### WebSocket Streaming API
 
-Three WebSocket endpoints are available under `/ws/v1/asr`:
+Two kinds of WebSocket endpoints are available:
 
 | Endpoint | Backend | Notes |
 |----------|---------|-------|
+| `/v1/realtime` | Qwen3-ASR (R2T2, vLLM / llama.cpp Q8) | **Recommended**: standard OpenAI Realtime transcription protocol, multilingual |
 | `/ws/v1/asr` | FunASR realtime (Paraformer) | Alibaba Cloud protocol compatible, Chinese streaming with realtime punctuation |
 | `/ws/v1/asr/funasr` | FunASR realtime | Backward-compatible alias of the above |
-| `/ws/v1/asr/qwen` | Qwen3-ASR (vLLM) | Qwen3 streaming, multilingual (zh/en/ja/...) |
+| `/ws/v1/asr/qwen` | — | **Deprecated**: replies `endpoint_deprecated` then closes (code 1008); use `/v1/realtime` |
 
-All three endpoints are **real-time speech transcription** — audio is sent
+These endpoints are **real-time speech transcription** — audio is sent
 incrementally and partial results stream back while speaking. This is the
 fundamental difference from the offline HTTP endpoints:
 
@@ -398,82 +400,73 @@ Authentication: WebSocket connections cannot send custom headers from
 browsers, so pass the API key as a query parameter (`?token=YOUR_KEY` or
 `x_nls_token`). Skipped when `API_KEY` is not configured.
 
-**Qwen3 streaming protocol** (`/ws/v1/asr/qwen`) - JSON control messages plus
-binary audio frames:
+**OpenAI Realtime transcription protocol** (`/v1/realtime`) — a standard
+OpenAI Realtime WebSocket subset (`intent=transcription`); recognition reuses
+the Qwen3-ASR streaming engine.
 
-1. Connect, then send `start`:
-   ```json
-   {"type": "start", "payload": {
-     "format": "pcm",              // "pcm" or "wav"
-     "sample_rate": 16000,
-     "language": "zh",             // optional, auto-detected
-     "context": "",                // hotword context
-     "enable_inverse_text_normalization": true,
-     "chunk_size_sec": 2.0,
-     "unfixed_chunk_num": 2,
-     "unfixed_token_num": 5
-   }}
-   ```
-2. Server replies `started` with the applied params.
-3. Send binary audio frames continuously (16kHz int16 PCM, or WAV bytes).
-4. Server emits `segment_start` / `segment_end` incrementally; `segment_end`
-   carries the full transcript so far (`result.text`) and the confirmed list.
-5. Send `{"type": "stop"}` to finish; errors arrive as `{"type": "error", ...}`.
+Authentication (any of): `Authorization: Bearer <API_KEY>`, query
+`?token=<API_KEY>`, or subprotocol `openai-insecure-api-key.<API_KEY>`.
+Handshake replies `Sec-WebSocket-Protocol: realtime`.
+
+Client events:
+
+| Event | Description |
+|-------|-------------|
+| `session.update` | Set `audio.input.format.rate` (16000/24000), `audio.input.transcription.{model,prompt,language,keywords}`, `audio.input.turn_detection` (`null` or `{"type":"server_vad"}`) |
+| `input_audio_buffer.append` | `audio` is base64 PCM16 little-endian; ≤10s per event |
+| `input_audio_buffer.commit` | Finalize the current segment manually (required when `turn_detection: null`) |
+| `input_audio_buffer.clear` | Drop uncommitted audio |
+
+Server events: `session.created` / `session.updated`,
+`conversation.item.input_audio_transcription.delta` (incremental text; concat
+deltas for the live transcript), `.completed` (`transcript` = final text with
+punctuation/ITN and optional two-pass refinement), `.failed`,
+`input_audio_buffer.committed`, `input_audio_buffer.cleared`, `error`.
+
+With `turn_detection: {"type":"server_vad"}` FireRedVAD finalizes on
+end-of-speech silence (continuous speech falls back to
+`QWEN_STREAM_SEGMENT_MAX_SEC`, default 60s), so no client commit is needed.
+With `turn_detection: null` the whole buffer is finalised on commit.
+Sample rate, chunk size, hotwords and other decoding parameters are controlled
+by the server `.env` (`QWEN_STREAM_*`).
 
 Python example:
 
 ```python
-import asyncio, json, websockets
+import asyncio, base64, json, websockets
 
 async def main():
-    async with websockets.connect(
-        "ws://localhost:9101/ws/v1/asr/qwen?token=YOUR_API_KEY"
-    ) as ws:
-        await ws.send(json.dumps({"type": "start", "payload": {"format": "pcm"}}))
+    uri = "ws://localhost:9101/v1/realtime?token=YOUR_API_KEY&intent=transcription"
+    async with websockets.connect(uri, subprotocols=["realtime"]) as ws:
+        print(json.loads(await ws.recv()))  # session.created
+        await ws.send(json.dumps({
+            "type": "session.update",
+            "session": {"audio": {"input": {
+                "format": {"type": "audio/pcm", "rate": 16000},
+                "transcription": {"model": "qwen3-asr", "prompt": "Bloomberg, Zhou Shumen"},
+                "turn_detection": {"type": "server_vad"},
+            }}}
+        }))
         with open("audio.wav", "rb") as f:
             f.read(44)  # skip WAV header
             while chunk := f.read(3200):  # 0.1s frames @16kHz int16
-                await ws.send(chunk)
-        await ws.send(json.dumps({"type": "stop"}))
-        async for raw in ws:
-            msg = json.loads(raw)
-            if msg.get("type") == "segment_end":
-                print(msg["result"]["text"])
+                await ws.send(json.dumps({
+                    "type": "input_audio_buffer.append",
+                    "audio": base64.b64encode(chunk).decode(),
+                }))
+                await asyncio.sleep(0.1)
+                while True:  # keep draining events to avoid server backpressure
+                    try:
+                        event = json.loads(await asyncio.wait_for(ws.recv(), 0.001))
+                    except asyncio.TimeoutError:
+                        break
+                    if event["type"].endswith(".delta"):
+                        print(event["delta"], end="", flush=True)
+                    elif event["type"].endswith(".completed"):
+                        print("\n[segment]", event["transcript"])
 
 asyncio.run(main())
 ```
-
-**FunASR streaming protocol** (`/ws/v1/asr` and `/ws/v1/asr/funasr`) -
-Alibaba Cloud NLS style: send JSON frames
-(`{"header": {"message_id": "...", "task": "start"}, "payload": {...}}`)
-followed by binary audio, then `task: "stop"`. The server emits events:
-`TranscriptionStarted` → `SentenceBegin` → `TranscriptionResultChanged`
-(intermediate results) → `SentenceEnd` → `TranscriptionCompleted`. Payload
-options include `format`, `sample_rate`, `enable_intermediate_result`,
-`enable_punctuation`, `enable_itn`.
-
-**Streaming behavior** (Qwen3 path): recognition is genuinely real-time. Each
-audio chunk (default 2s) is decoded incrementally and pushed as
-`type: "result"` with `is_partial: true` — clients can render live captions.
-When a sentence finishes (3s silence or the per-segment cap) a `segment_end`
-is emitted and the text is confirmed. Latency tuning:
-
-| Param | Default | Effect |
-|-------|---------|--------|
-| `chunk_size_sec` | 2.0 | First-char latency; lower (e.g. 1.0) for more real-time feel |
-| `unfixed_token_num` | 5 | Tail rollback tokens for boundary correction |
-| `unfixed_chunk_num` | 2 | Warm-up chunks before truncation is allowed |
-| `max_new_tokens` | 2048 | Per-chunk generation cap (server default, configurable) |
-| `max_new_tokens_initial` | 32 | Per-chunk generation cap during warm-up |
-| `warmup_chunks` | 8 | Number of warm-up chunks (first N use the initial cap) |
-
-> **About `max_new_tokens` (measured on Confucius4)**: this project re-runs the
-> **full accumulated audio** every chunk (no official KV-incremental decoding),
-> so the value is the generation cap for the whole accumulated text and must be
-> large enough; setting it to `2` truncates the text each round until only
-> punctuation is left. It is a **cap, not a cost** (generation stops at EOS), so
-> raising it does not add latency — low latency comes from `chunk_size_sec`.
-> Server defaults are configurable via the `QWEN_STREAM_*` environment variables.
 
 **Streaming limitations**:
 - Both paths do **not** return word-level timestamps.
@@ -514,9 +507,10 @@ Disable speaker diarization:
 Automatic long audio segmentation:
 
 1. **VAD Voice Detection** - Detect voice boundaries, filter silence
-2. **Greedy Merge** - Accumulate voice segments, ensure each segment does not exceed `MAX_SEGMENT_SEC` (default 60s)
-3. **Silence Split** - Force split when silence between voice segments exceeds 3 seconds
-4. **Batch Inference** - Multi-segment parallel processing, 2-3x performance improvement in GPU mode
+2. **Greedy Merge** - Merge short segments into neighbours, keeping every segment within `MAX_SEGMENT_SEC` (default 60s)
+3. **Bounded Split Without Dropping Tails** - Over-long segments are cut at low-energy points or by fixed duration; a short tail is folded into the previous segment instead of being dropped
+4. **Sentence-ending Restoration** - R2T2 usually omits punctuation when a segment is cut off mid-sentence; the offline result gets one final mark from the FunASR punctuation model (`ASR_RESTORE_SENTENCE_ENDING=true`; only the mark is added, the ASR text is never rewritten)
+5. **Batch Inference** - Multi-segment parallel processing, 2-3x performance improvement in GPU mode
 
 ### WebSocket Streaming Limitations
 
@@ -528,7 +522,7 @@ Automatic long audio segmentation:
 - Audio ingress is bounded to 10 seconds and applies WebSocket backpressure instead of dropping audio. Send incrementally and continue reading recognition events.
 - This path uses Paraformer, while offline endpoints use Qwen3-ASR. Compare latency within the same path, not their total throughput.
 
-**Qwen3-ASR Streaming** (using `/ws/v1/asr/qwen`):
+**Qwen3-ASR Streaming** (using `/v1/realtime`, standard OpenAI Realtime protocol):
 - ✅ Multi-language real-time recognition
 - ✅ CUDA vLLM and CPU Rust both support the current streaming path
 - ❌ Word-level timestamps are not available in the current streaming path
@@ -571,7 +565,7 @@ split across two channels:
 
 | Model | Size | Channel & Path | Used By |
 |-------|------|----------------|---------|
-| Confucius4-R2T2 | ~3.9GB | Local: `/data1/models/Confucius4-R2T2` | **Default** offline transcription, `/ws/v1/asr/qwen` streaming |
+| Confucius4-R2T2 | ~3.9GB | Local: `/data1/models/Confucius4-R2T2` | **Default** offline transcription, `/v1/realtime` streaming |
 | Qwen3-ForcedAligner 0.6B | ~1.8GB | Local: `/data1/models/Qwen3-ForcedAligner-0.6B` | Word-level timestamps (`word_timestamps=true`, offline, lazy-loaded) |
 | Paraformer Large | ~849MB | MS: `/data1/models/modelscope/hub/models/iic/speech_paraformer-large_...` | `/ws/v1/asr` + `/ws/v1/asr/funasr` (Chinese realtime streaming) |
 | Punctuation (offline) | ~300MB | MS: `/data1/models/modelscope/hub/models/iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch` | Punctuation for offline/streaming ASR |
@@ -599,8 +593,9 @@ split across two channels:
 | `POST /v1/audio/transcriptions` | qwen3-asr-confucius4-r2t2 |
 | `POST /stream/v1/asr` | qwen3-asr-confucius4-r2t2 |
 | `GET /v1/models`, `health`, `/stream/v1/asr/models` | read-only, no inference |
-| `/ws/v1/asr/qwen` | qwen3-asr-confucius4-r2t2 |
+| `/v1/realtime` | qwen3-asr-confucius4-r2t2 |
 | `/ws/v1/asr`, `/ws/v1/asr/funasr` | paraformer-large (Chinese realtime) |
+| `/ws/v1/asr/qwen` | Deprecated, returns `endpoint_deprecated` |
 
 All HTTP transcription endpoints share the default offline model
 (`qwen3-asr-confucius4-r2t2`; override with `QWEN3_ASR_MODEL=qwen3-asr-0.6b`).
@@ -687,6 +682,7 @@ Settings in `.env.example`:
 | `QWEN_SHUTDOWN_AFTER_S` | `600` | Second tier: after this many more idle seconds the engines are fully shut down, returning the CUDA context that sleep keeps reserved; `0` disables; the next request needs a full reload (11-21s) |
 | `QWEN_LOW_VRAM_THRESHOLD_GB` | `6.0` | Trigger VRAM-pressure sleep when free VRAM drops below this value while engines are idle |
 | `QWEN_VRAM_PRESSURE_COOLDOWN_S` | `60` | Idle seconds required before a VRAM-pressure sleep |
+| `ASR_RESTORE_SENTENCE_ENDING` | `true` | Restore a missing final punctuation mark with the FunASR CT-Transformer model (only the mark is added; ASR text is never rewritten) |
 | `ASR_DEFAULT_HOTWORDS` | (empty) | Server-side preset hotwords (comma-separated, recommended ≤512 chars), merged with request hotwords (OpenAI `prompt` / native `vocabulary_id`) before being injected into the recognition context; hotwords are adopted preferentially, not forced |
 | `VOICEPRINT_ENABLED` | `true` | Enable voiceprint identity matching in ASR results |
 | `VOICEPRINT_DB_PATH` | `./data/voiceprints.sqlite3` | SQLite + sqlite-vec voiceprint database path |

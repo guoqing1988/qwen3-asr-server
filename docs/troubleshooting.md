@@ -250,7 +250,7 @@ sudo systemctl daemon-reload
 
 ### 流式（实时转录）输出乱码 / 退化成标点
 
-**现象**：`/ws/v1/asr/qwen` 流式返回的文本是 `"language None"`、`"None"`、`"."`，而不是实际转写内容；同一音频的离线转写完全正常。
+**现象**：Qwen3 流式（原 `/ws/v1/asr/qwen`，现 `/v1/realtime`）返回的文本是 `"language None"`、`"None"`、`"."`，而不是实际转写内容；同一音频的离线转写完全正常。
 
 **三个根因（2026-09-25 逐一定位）**：
 
@@ -438,4 +438,6 @@ load=11.0s → before-sleep infer ok → sleep=3.7s（释放 6.45GiB）→ wake=
 15. **新 `/v1/realtime` 握手返回 403**：鉴权失败。优先用 `Authorization: Bearer <API_KEY>` 或 `?token=<API_KEY>`；浏览器可用子协议 `openai-insecure-api-key.<API_KEY>`。未配置 `API_KEY` 时免鉴权。
 16. **`delta` 拼接后与 `.completed` 文本略有差异**：预期行为。delta 走流式 append-only 且**关闭 ITN**（保证增量单调），`.completed` 才对定稿文本做 ITN/标点，并在 `QWEN_STREAM_FINAL_PASS=true` 时用离线路径重转（专名更准）。
 17. **`server_vad` 模式下长时间没有 `.completed`**：连续讲话无静音时不会落定，达到 `QWEN_STREAM_SEGMENT_MAX_SEC`（默认 60s）会强制落定；若仍不落定，检查音频是否有有效语音（段内有效语音 <0.8s 不落定）以及 FireRedVAD 模型是否加载成功。
-18. **回滚**：`.env` 改回 `ASR_ENGINE=vllm`（或删除）→ `sudo systemctl restart qwen3-asr`，vLLM 路径未改动。
+18. **离线转写末尾缺句号/问号（`…是不是所以你看`）**：R2T2 对段尾被截断的音频经常不输出标点。已加 `ASR_RESTORE_SENTENCE_ENDING=true`：用 FunASR 标点模型给缺句末的段补一个标点（只补标点、不改正文；英文/数字结尾用 `.`；结尾逗号替换为句号）。若仍想保留模型原始输出，设为 `false` 重启。
+19. **离线分段最后一句被吞/少字**：旧 `_split_by_fixed_duration` 会丢弃不足 `min_segment_ms` 的尾段；已同步上游修复（尾段并入前段）。若仍出现，检查 `MAX_SEGMENT_SEC` 是否过小（<5s 会把正常句子切碎）。
+20. **回滚**：`.env` 改回 `ASR_ENGINE=vllm`（或删除）→ `sudo systemctl restart qwen3-asr`，vLLM 路径未改动。

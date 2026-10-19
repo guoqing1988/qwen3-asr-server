@@ -529,7 +529,7 @@ class SpeakerDiarizer:
     ) -> List[SpeakerSegment]:
         max_segment_ms = int(settings.MAX_SEGMENT_SEC * 1000)
         if max_segment_ms <= 0:
-            return segments
+            raise ValueError("Maximum segment duration must be at least one millisecond")
 
         split_segments: List[SpeakerSegment] = []
         for seg in segments:
@@ -539,9 +539,13 @@ class SpeakerDiarizer:
 
             current_start_ms = seg.start_ms
             while seg.end_ms - current_start_ms > max_segment_ms:
-                hard_boundary_ms = current_start_ms + max_segment_ms
+                # 硬边界不越过段尾：给尾部留出 min_segment，避免最后一句被切碎
+                hard_boundary_ms = min(
+                    current_start_ms + max_segment_ms,
+                    seg.end_ms - min(self.min_segment_ms, max_segment_ms),
+                )
                 lower_boundary_ms = max(
-                    current_start_ms + self.min_segment_ms,
+                    min(hard_boundary_ms, current_start_ms + self.min_segment_ms),
                     hard_boundary_ms - self.LOW_ENERGY_SEARCH_WINDOW_MS,
                 )
                 boundary_ms = self._find_low_energy_boundary_ms(
