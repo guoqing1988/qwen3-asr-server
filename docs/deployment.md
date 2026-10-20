@@ -6,7 +6,7 @@
 
 | 模式 | 命令 | 说明 |
 |------|------|------|
-| GPU | `uv sync` | Linux/NVIDIA 运行时，默认锁定 CUDA 12.8/cu128 `torch/torchaudio/torchvision` + `vllm[audio]==0.19.0` |
+| GPU | `uv sync` | Linux/NVIDIA 运行时，锁定 CUDA 13.0/cu130 `torch 2.13.0` / `torchaudio 2.11.0` / `torchvision 0.28.0` + `vllm[audio]==0.30.0` + `transformers`（固定 commit，含 Nemotron-3 说话人分离） |
 | CPU | `./scripts/sync_cpu_env.sh` | Linux/CPU 运行时 |
 
 ## 快速部署
@@ -16,7 +16,7 @@
 适用于生产环境，提供更快的推理速度：
 
 **前置要求：**
-- NVIDIA GPU（默认镜像面向 CUDA 12.8+；CUDA 12.6 / 13.0 可通过构建参数覆盖）
+- NVIDIA GPU（需要 CUDA 13.0 驱动，≥580；cu130 wheel）
 - 已安装 NVIDIA Container Toolkit
 - 显存 8GB+（默认模型 Confucius4-R2T2；24GB 卡实测：仅 ASR 引擎约 6GB，含 VAD/声纹/Paraformer/标点完整栈约 8.7GB，启用词级时间戳峰值约 12GB）
 
@@ -104,6 +104,13 @@ uv sync
 
 依赖完全由 `pyproject.toml` 定义，`uv sync` 一键安装，无需单独 `pip install`。
 `requirements.txt` 仅用于 Docker 镜像运行时的增量补装，本地部署不涉及。
+
+**环境要点（2026-10 升级后）**
+
+- `torch 2.13.0+cu130` / `vllm[audio]==0.30.0` / `transformers` 固定 commit（`27166ea0`，含 `Nemotron3DiarizationForAudioFrameClassification`）——三者必须成套，混搭旧版会导致 `transformers` 找不到 Nemotron 架构或 vLLM 启动失败
+- `ninja` 已列入依赖：未安装 `flashinfer-cubin` 时 FlashInfer 首次推理前要 JIT 编译采样 kernel，`start.py` 会把虚拟环境的 `bin` 目录注入 `PATH`（systemd 下也可用），因此**首次启动会多花约 60s**
+- 说话人分离模型需单独准备：`/data1/models/Nemotron-3-Diarization`（397MB），由 `NEMOTRON_MODEL_PATH` 指定；缺失时该功能报错，其它功能不受影响
+- 升级/回滚：升级前备份旧 venv（`cp -a .venv /data1/venvs/qwen3-asr-backup-$(date +%F)`），切换时把 `.venv` 指向新环境（`uv sync` 到目标目录后 `ln -sfn`），验证通过再删备份；回滚只需把软链接指回备份并 `systemctl restart qwen3-asr`
 
 **2. 配置环境变量**
 

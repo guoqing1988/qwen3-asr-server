@@ -440,4 +440,10 @@ load=11.0s → before-sleep infer ok → sleep=3.7s（释放 6.45GiB）→ wake=
 17. **`server_vad` 模式下长时间没有 `.completed`**：连续讲话无静音时不会落定，达到 `QWEN_STREAM_SEGMENT_MAX_SEC`（默认 60s）会强制落定；若仍不落定，检查音频是否有有效语音（段内有效语音 <0.8s 不落定）以及 FireRedVAD 模型是否加载成功。
 18. **离线转写末尾缺句号/问号（`…是不是所以你看`）**：R2T2 对段尾被截断的音频经常不输出标点。已加 `ASR_RESTORE_SENTENCE_ENDING=true`：用 FunASR 标点模型给缺句末的段补一个标点（只补标点、不改正文；英文/数字结尾用 `.`；结尾逗号替换为句号）。若仍想保留模型原始输出，设为 `false` 重启。
 19. **离线分段最后一句被吞/少字**：旧 `_split_by_fixed_duration` 会丢弃不足 `min_segment_ms` 的尾段；已同步上游修复（尾段并入前段）。若仍出现，检查 `MAX_SEGMENT_SEC` 是否过小（<5s 会把正常句子切碎）。
-20. **回滚**：`.env` 改回 `ASR_ENGINE=vllm`（或删除）→ `sudo systemctl restart qwen3-asr`，vLLM 路径未改动。
+20. **回滚（Q8 ↔ vLLM）**：`.env` 改回 `ASR_ENGINE=vllm`（或删除）→ `sudo systemctl restart qwen3-asr`。
+21. **vLLM 启动报 `No available memory for the cache blocks`**：0.30 默认开启 CUDA graph memory profiling（`gpu_memory_utilization=0.35` 实际等效 0.3346），日志里会打印 `Available KV cache memory: -1.45 GiB`。调大 `QWEN_GPU_MEMORY_UTILIZATION`（如 0.40~0.45），或减小 `QWEN_MAX_NUM_BATCHED_TOKENS`（它同时决定 encoder cache 预算）；配置了 `QWEN_KV_CACHE_MEMORY_BYTES` 时会跳过 profiling，此时要按 log 里的 `Initial free memory` 校准。
+22. **首次推理前卡住约 60s，日志 `JIT kernel warmup` / `FileNotFoundError: 'ninja'`**：未安装 `flashinfer-cubin`（1.5GB，只发 GitHub release，国内拉取极慢，故未列入依赖），FlashInfer 需 JIT 编译采样 kernel。`pyproject.toml` 已加 `ninja` 依赖，`start.py` 会把 venv 的 `bin` 注入 `PATH`；若是手工起的服务，确保 `ninja` 在 `PATH` 里（`/data1/venvs/qwen3-asr-upgrade/bin/ninja`）。编译产物缓存在 `~/.cache/flashinfer`，后续启动不再编译。
+23. **说话人分离报 `Nemotron3DiarizationForAudioFrameClassification` / 架构不存在**：`transformers` 必须是固定 commit（`27166ea0`，见 `pyproject.toml`）。旧的 4.x 不认识 Nemotron-3 架构，`AutoModelForAudioFrameClassification` 会失败并连带 diarization 报错（其它功能正常）。
+24. **长音频说话人数被切得过碎（3 小时音频出现 8 个说话人）**：Nemotron 上限 8 人，长会议里出现的配音/插话会被单独计为说话人；这是模型上限而非 bug。若只需段落级区分，可把 `enable_speaker_diarization=false` 后按需合并。
+25. **vLLM 0.30 下 `/v1/realtime` 出现英文碎片或丢字**（Q8 正常）：0.30 起流式每轮都要重新生成 `language X<asr_text>` 头部，短 chunk（<1s）音频模型容易输出幻觉词；已在 `_stream_max_new_tokens` 预留 12 token 并改用「已解析正文 + 显式头部」构造 prefix，但仍不如 Q8 稳定。**实时场景请用 `ASR_ENGINE=llamacpp`**，vLLM 后端以离线转写为主。
+26. **切生产 venv 后启动失败/回滚**：升级前 `cp -a .venv /data1/venvs/qwen3-asr-backup-$(date +%F)`；回滚把 `/data1/www/qwen3-asr-server/.venv` 重新指向备份（或恢复原目录）后 `sudo systemctl restart qwen3-asr`。注意 `uv.lock` 与已安装 C 扩展必须成套，不要对运行中的环境执行 `uv sync --frozen` 降级。

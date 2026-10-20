@@ -19,7 +19,7 @@
 
 - **混合运行时栈** - 离线推理由自动选择的 Qwen3-ASR 提供，WebSocket 流式由 Paraformer realtime 能力提供
 - **多语言识别** - Qwen3-ASR 支持 52 种语言与方言，中英日韩等自动检测
-- **说话人分离** - 基于 CAM++ 模型自动识别多说话人，返回说话人标记
+- **说话人分离** - 基于 Nemotron-3-Diarization（帧级 10ms、支持重叠、最多 8 人）自动识别多说话人，返回说话人标记
 - **声纹注册与说话人命名** - 为说话人注册声纹样本后，转写结果的 `speaker_id` 自动替换为显示名
 - **OpenAI API 兼容** - 支持 `/v1/audio/transcriptions` 端点，可直接使用 OpenAI SDK
 - **阿里云 API 兼容** - 支持阿里云语音识别 RESTful API 和 WebSocket 流式协议
@@ -511,14 +511,13 @@ asyncio.run(main())
 
 ## 说话人分离
 
-基于 CAM++ 模型实现多说话人自动识别：
+基于 **Nemotron-3-Diarization**（本地 `/data1/models/Nemotron-3-Diarization`）实现帧级说话人分离：
 
 - **默认开启** - `enable_speaker_diarization=true`
-- **自动识别** - 无需预设说话人数量，模型自动检测
-- **说话人标记** - 响应中包含 `speaker_id` 字段（如 "说话人1"、"说话人2"）
-- **智能合并** - 两层合并策略避免孤立短片段：
-  - 第一层：小于10秒的同说话人片段累积合并
-  - 第二层：连续片段累积合并至60秒上限
+- **自动识别** - 无需预设说话人数量，模型自动检测（上限 8 人）
+- **帧级判定** - 10ms 帧粒度、支持说话人重叠，长音频按「说话人活动区间」切分成有界片段（≤`MAX_SEGMENT_SEC`）再逐段识别
+- **词级归属** - 启用分离时自动跑 forced aligner，按词级时间把识别文本切给对应说话人（同一句内换人也能切开），再按说话人合并成段落
+- **说话人标记** - 响应中包含 `speaker_id` 字段（如 "说话人1"、"说话人2"）；已注册声纹的说话人会替换为显示名
 - **字幕支持** - SRT/VTT 格式输出包含说话人标记 `[说话人1] 文本内容`
 
 关闭说话人分离：
@@ -599,16 +598,16 @@ asyncio.run(main())
 | Paraformer Large | ~849MB | MS：`/data1/models/modelscope/hub/models/iic/speech_paraformer-large_...` | `/ws/v1/asr` + `/ws/v1/asr/funasr`（中文实时流式） |
 | 标点（离线） | ~300MB | MS：`/data1/models/modelscope/hub/models/iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch` | 离线/流式标点 |
 | 标点（实时） | ~300MB | MS：`/data1/models/modelscope/hub/models/iic/punc_ct-transformer_..._vad_realtime-...` | FunASR 流式路径实时标点 |
-| CAM++ 说话人分离 | ~300MB | MS：`/data1/models/modelscope/hub/models/iic/speech_campplus_speaker-diarization_common` | 说话人分离（离线） |
-| CAM++ 声纹验证 | ~90MB | MS：`/data1/models/modelscope/hub/models/damo/speech_campplus_sv_zh-cn_16k-common` | 说话人聚类 + 声纹匹配 |
-| CAM++ SCL | ~90MB | MS：`/data1/models/modelscope/hub/models/damo/speech_campplus-transformer_scl_zh-cn_16k-common` | 说话人聚类 |
+| Nemotron-3-Diarization | ~397MB | 本地：`/data1/models/Nemotron-3-Diarization` | 说话人分离（离线，帧级/重叠/8 人） |
+| CAM++ 声纹验证 | ~90MB | MS：`/data1/models/modelscope/hub/models/damo/speech_campplus_sv_zh-cn_16k-common` | 声纹注册与命名匹配 |
 | VAD（FSMN） | ~69MB | MS：`/data1/models/modelscope/hub/models/damo/speech_fsmn_vad_zh-cn-16k-common-pytorch` | 语音活动检测、音频切分 |
 
 **使用场景指引**：
 
 - **中文实时流式**（低延迟 + 实时标点）：FunASR 路径使用 Paraformer Large + 实时标点模型（ModelScope 渠道）
 - **多语言 / 离线 / 词级时间戳**：Confucius4-R2T2 + ForcedAligner
-- **说话人分离与声纹**（仅离线接口）：CAM++ 系列模型（ModelScope 渠道）
+- **说话人分离**（仅离线接口）：Nemotron-3-Diarization（本地模型，需 transformers ≥5 的 `Nemotron3DiarizationForAudioFrameClassification`）
+- **声纹命名**（仅离线接口）：CAM++（ModelScope 渠道）
 - **下载行为**：启动时自动补下缺失模型（ModelScope 模型走 `modelscope.cn`，Qwen 模型走 HuggingFace 或 `HF_ENDPOINT` 镜像）；完全离线部署请提前把模型放到 `/data1/models` 并配好上述路径变量
 
 **接口 × 模型对应**：

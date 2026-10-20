@@ -19,7 +19,7 @@ Speech recognition API service centered on [Qwen3-ASR](https://github.com/QwenLM
 
 - **Hybrid Runtime Stack** - Uses auto-selected Qwen3-ASR for offline inference and Paraformer realtime for websocket streaming
 - **Multilingual Recognition** - Qwen3-ASR supports 52 languages and dialects with automatic detection (zh/en/ja/ko/...)
-- **Speaker Diarization** - Automatic multi-speaker identification using CAM++ model
+- **Speaker Diarization** - Frame-level (10 ms) multi-speaker identification with Nemotron-3-Diarization (overlap-aware, up to 8 speakers)
 - **Voiceprint Registration & Naming** - Register voiceprint samples per speaker; matched `speaker_id` values are replaced with display names
 - **OpenAI API Compatible** - Supports `/v1/audio/transcriptions` endpoint, works with OpenAI SDK
 - **Alibaba Cloud API Compatible** - Supports Alibaba Cloud Speech RESTful API and WebSocket streaming protocol
@@ -214,7 +214,7 @@ Current runtime behavior on the mainline codebase:
 - The default offline model is `qwen3-asr-confucius4-r2t2` (Confucius4-R2T2, CUDA vLLM path)
 - `word_timestamps=true` works on the current offline CUDA and CPU Rust paths
 - WebSocket streaming does not currently return word-level timestamps
-- CAM++ speaker diarization remains required and still follows `DEVICE`; on CPU its main hotspot is speaker verification embedding
+- Voiceprint embedding (CAM++) still follows `DEVICE`; its main CPU hotspot is speaker verification embedding. Speaker diarization itself is Nemotron-3 (GPU-recommended, ~397MB)
 
 ## API Endpoints
 
@@ -480,14 +480,13 @@ asyncio.run(main())
 
 ## Speaker Diarization
 
-Multi-speaker automatic identification based on CAM++ model:
+Frame-level speaker diarization powered by **Nemotron-3-Diarization** (local `/data1/models/Nemotron-3-Diarization`):
 
 - **Enabled by Default** - `enable_speaker_diarization=true`
-- **Automatic Detection** - No preset speaker count needed, model auto-detects
-- **Speaker Labels** - Response includes `speaker_id` field (e.g., "Speaker1", "Speaker2")
-- **Smart Merging** - Two-layer merge strategy to avoid isolated short segments:
-  - Layer 1: Accumulate merge same-speaker segments < 10 seconds
-  - Layer 2: Accumulate merge continuous segments up to 60 seconds
+- **Automatic Detection** - No preset speaker count needed, model auto-detects (max 8 speakers)
+- **Frame-level / Overlap-aware** - 10 ms frames; long recordings are cut at speaker-activity boundaries into bounded segments (`MAX_SEGMENT_SEC`) before ASR
+- **Word-level Attribution** - Forced aligner runs automatically when diarization is on, so a single utterance that switches speakers is split at the word level, then merged into speaker paragraphs
+- **Speaker Labels** - Response includes `speaker_id` field (e.g., "说话人1"); registered voiceprints replace it with the display name
 - **Subtitle Support** - SRT/VTT output includes speaker labels `[Speaker1] text content`
 
 Disable speaker diarization:
@@ -570,9 +569,8 @@ split across two channels:
 | Paraformer Large | ~849MB | MS: `/data1/models/modelscope/hub/models/iic/speech_paraformer-large_...` | `/ws/v1/asr` + `/ws/v1/asr/funasr` (Chinese realtime streaming) |
 | Punctuation (offline) | ~300MB | MS: `/data1/models/modelscope/hub/models/iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch` | Punctuation for offline/streaming ASR |
 | Punctuation (realtime) | ~300MB | MS: `/data1/models/modelscope/hub/models/iic/punc_ct-transformer_..._vad_realtime-...` | Realtime punctuation in the FunASR websocket path |
-| CAM++ diarization | ~300MB | MS: `/data1/models/modelscope/hub/models/iic/speech_campplus_speaker-diarization_common` | Speaker diarization (offline) |
-| CAM++ speaker verification | ~90MB | MS: `/data1/models/modelscope/hub/models/damo/speech_campplus_sv_zh-cn_16k-common` | Speaker clustering + voiceprint matching |
-| CAM++ SCL | ~90MB | MS: `/data1/models/modelscope/hub/models/damo/speech_campplus-transformer_scl_zh-cn_16k-common` | Speaker clustering |
+| Nemotron-3-Diarization | ~397MB | Local: `/data1/models/Nemotron-3-Diarization` | Speaker diarization (offline, frame-level/overlap/8 speakers) |
+| CAM++ speaker verification | ~90MB | MS: `/data1/models/modelscope/hub/models/damo/speech_campplus_sv_zh-cn_16k-common` | Voiceprint registration / naming |
 | VAD (FSMN) | ~69MB | MS: `/data1/models/modelscope/hub/models/damo/speech_fsmn_vad_zh-cn-16k-common-pytorch` | Voice activity detection for audio splitting |
 
 **Scenario guidance**:
@@ -580,7 +578,8 @@ split across two channels:
 - **Chinese realtime streaming** (low latency, realtime punctuation): FunASR
   path uses Paraformer Large + realtime punctuation (ModelScope).
 - **Multilingual / offline / word timestamps**: Confucius4-R2T2 + ForcedAligner.
-- **Speaker diarization & voiceprints** (offline only): CAM++ models (ModelScope).
+- **Speaker diarization** (offline only): Nemotron-3-Diarization (local model, requires the pinned `transformers` commit with `Nemotron3DiarizationForAudioFrameClassification`).
+- **Voiceprint naming** (offline only): CAM++ (ModelScope).
 - **Download behavior**: missing models are auto-downloaded at startup
   (ModelScope models from `modelscope.cn`, Qwen models from HuggingFace, or the
   `HF_ENDPOINT` mirror). For fully offline deployments, place the models under

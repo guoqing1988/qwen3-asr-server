@@ -1,6 +1,8 @@
 # CLAUDE.md
 
-Qwen3-ASR 服务（GPU 版）：Confucius4-R2T2（vLLM bf16 默认，可选 llama.cpp Q8，`ASR_ENGINE` 切换）+ FunASR 实时流式 + 声纹识别（sqlite-vec），支持 **Docker Compose** 与 **本地 systemd** 两种部署方式。
+Qwen3-ASR 服务（GPU 版）：Confucius4-R2T2（vLLM bf16 默认，可选 llama.cpp Q8，`ASR_ENGINE` 切换）+ FunASR 实时流式 + Nemotron-3 说话人分离 + 声纹识别（sqlite-vec），支持 **Docker Compose** 与 **本地 systemd** 两种部署方式。
+
+运行环境：**torch 2.13.0+cu130 / vLLM 0.30.0 / transformers 5.18.0.dev0（固定 commit）/ CUDA 13.0**；依赖统一由 `pyproject.toml` + `uv.lock` 管理（`uv sync`）。
 
 ## 开发与运行
 
@@ -18,7 +20,8 @@ Qwen3-ASR 服务（GPU 版）：Confucius4-R2T2（vLLM bf16 默认，可选 llam
 - **模型缓存**：统一放在 `/data1/models/`（`MODELSCOPE_CACHE=/data1/models/modelscope/hub`、`HF_HOME=/data1/models/huggingface`）
   - ASR 主模型：`/data1/models/Confucius4-R2T2`（`QWEN3_ASR_MODEL_PATH`）
   - 词级时间戳对齐器：`/data1/models/Qwen3-ForcedAligner-0.6B`（`QWEN3_FORCED_ALIGNER_PATH`）
-  - VAD / CAM++ / Paraformer / 标点：`/data1/models/modelscope/hub/models/{iic,damo}`
+  - 说话人分离：`/data1/models/Nemotron-3-Diarization`（`NEMOTRON_MODEL_PATH`，帧级/Nemotron-3，397MB）
+  - VAD / 声纹 CAM++ / Paraformer / 标点：`/data1/models/modelscope/hub/models/{iic,damo}`
 - **启动流程**：`start.py` 加载 `.env` → 检查模型缺失则报错（离线模式不自动下载）→ main.py lifespan 预加载引擎 → 就绪
 - **配置**：`.env` 文件，`start.py` 通过 `load_dotenv()` 加载
 - **GPU 选择**：由 `.env` 的 `CUDA_VISIBLE_DEVICES` 决定（unit 里**不设** `CUDA_VISIBLE_DEVICES` / `DEVICE` 的 `Environment=`，否则 systemd 的 `Environment` 优先级更高，会架空 `.env`）
@@ -74,6 +77,15 @@ Qwen3-ASR 服务（GPU 版）：Confucius4-R2T2（vLLM bf16 默认，可选 llam
 - 流式 partial **关闭 ITN**（保证 delta 单调，避免 `一`→`1` 改写前缀），`.completed` 才做 ITN/标点；`server_vad` 模式句尾静音自动落定，连续讲话按 `QWEN_STREAM_SEGMENT_MAX_SEC`（60s）兜底
 - **`ws /ws/v1/asr/qwen` 已废弃**：连接后返回 `{"type":"error","error":{"code":"endpoint_deprecated"}}` 并 `close(1008)`；`/ws/v1/asr`、`/ws/v1/asr/funasr`（FunASR 阿里云协议）保持不变
 
+## 说话人分离与说话人归属（Nemotron-3）
+
+- **模型**：`app/utils/speaker_diarizer.py` 用 `AutoModelForAudioFrameClassification`（`Nemotron3DiarizationForAudioFrameClassification`）加载 `/data1/models/Nemotron-3-Diarization`，**帧级 10ms** 输出 8 路说话人概率，`diarize(path)` 返回 `DiarizationResult(segments, probabilities, frame_seconds, duration, speaker_ids)`，`speech_intervals_ms()` 给出合并重叠后的语音区间（说话人上限 8）；标签为「说话人N」，失败抛 `DefaultServerErrorException`
+- **取代 CAM++ 自动聚类**：旧 CAM++ diarization 在长音频（≥2048 embeddings）走 HDBSCAN 会欠分（实测 3 人音频只出 2 人）；Nemotron 实测同一 4524s 音频出 4 人、RTF≈0.014（62s/75min）、加载 18s（首次）、之后 6s/10min
+- **切分**：`AudioSplitter.merge_segments_greedy` 把说话人活动区间边界当切点，**覆盖整条时间轴**（区间之间的间隙也送 ASR——未检测到活动不等于静音），仅对 <1s 短段做邻段合并，超长段按 `MAX_SEGMENT_SEC` 切分；`split_audio_file(..., speech_segments=)` 直接吃 Nemotron 的区间，未开分离时回退 FunASR VAD
+- **归属**：`app/services/asr/speaker_attribution.py`（`assign_speakers` + `consolidate_speaker_turns`）按词级时间把 ASR 块切到说话人（覆盖度 ≥0.5 才切换、模糊时沿用当前说话人），再把同人跨停顿合并成段落、≤2s 插话并入主说话人、段落过长在句末切分；词级时间戳偶有毫秒级越界会钳制到段内（不再整单失败）
+- 启用 diarization 时**自动跑 forced aligner**（`needs_words = word_timestamps or diarization`），返回给客户端前按请求恢复（未请求词级则清掉 `word_tokens`），对外结构不变
+- 声纹（CAM++）仍独立负责「说话人命名」：先 diarization 分段 → 按 speaker 分组提取 embedding → 命中已注册声纹则替换 `speaker_id`
+
 ## 引擎容错与显存策略（已实现）
 
 - **懒加载自动重试**：引擎创建失败重试 3 次（间隔 5s/10s）
@@ -110,11 +122,14 @@ Qwen3-ASR 服务（GPU 版）：Confucius4-R2T2（vLLM bf16 默认，可选 llam
 - 容器重建丢可写层：`docker exec` 装的包（pytest 等）需重装；`.env` 备份放 `.env.bak.*`
 - **CAM++ 离线加载**：`iic/speech_campplus_speaker-diarization_common/configuration.json` 里的子模型路径（`speaker_model` / `change_locator` / `vad_model`）可能残留旧路径（旧 Docker 路径，或缓存目录多一层 `models`）。`fix_camplusplus_config()` 启动时按路径末尾的 `<org>/<name>`（`damo` / `iic`）提取 model id，再用当前 `MODELSCOPE_CACHE` 重建，自动修正；若仍未修复，检查子模型目录权限（`sudo chown`）
 - **ModelScope 缓存路径**：库真实结构是 `$MODELSCOPE_CACHE/models/<id>`，`settings.MODELSCOPE_PATH` 已按此拼接（`MODELSCOPE_CACHE` 指到 `.../modelscope/hub` 即可）；模型统一放 `/data1/models`，不再放项目内 `models/`
+- **vLLM 0.30 流式退化（已知）**：`/v1/realtime` 在 vLLM 后端上短 chunk 会出现幻觉词/丢字（每轮 `language X<asr_text>` 头部需重新生成，动态 `max_tokens` 已预留 12 token，但仍不如 Q8 稳定）。实时场景请用 Q8（`ASR_ENGINE=llamacpp`，T8 append-only + 首轮静音跳过 + <0.8s 不落定），vLLM 后端以离线转写为主
+- **vLLM 0.30 显存口径变化**：默认开启 CUDA graph memory profiling，`gpu_memory_utilization=0.35` 等效 0.3346；配 `kv_cache_memory_bytes` 时会跳过 profiling，若显存仍不足会报 `No available memory for the cache blocks`（调大 `QWEN_GPU_MEMORY_UTILIZATION` 或减小 `QWEN_MAX_NUM_BATCHED_TOKENS`/encoder 预算）
+- **FlashInfer 未装预编译 cubin**：`flashinfer-cubin`（1.5GB，仅 GitHub release）未列入依赖，首次推理前 FlashInfer 会 JIT 编译采样 kernel，需要 PATH 里能找到 `ninja`（`pyproject.toml` 已加 `ninja`；`start.py` 启动时把 venv 的 bin 目录注入 PATH，systemd 下也生效），首启因此慢约 60s
 - **音频解码兜底**：`convert_audio_to_wav` 为三级链路（librosa/soundfile → PyAV 逐帧容错 → ffmpeg CLI），损坏 mp3 由 PyAV/ffmpeg 兜底；`av` 已提升为显式依赖，本机 ffmpeg 已通过 `apt` 安装
 
 ## 离线分段与标点（2026-10-19 同步上游修正）
 
-- **分段有界不丢尾音**（上游 `534405a`/`c02da1e`）：`AudioSplitter.merge_segments_greedy` 合并后再按 `MAX_SEGMENT_SEC` 切分；`_split_by_fixed_duration` 把不足最小时长的尾段并入前段（旧实现会直接丢弃），毫秒/采样点换算改整数；`SpeakerDiarizer.split_long_segments` 的硬边界不越过段尾（保留 `min_segment` 尾部）
+- **分段有界不丢尾音**（上游 `534405a`/`c02da1e`）：`AudioSplitter.merge_segments_greedy` 合并后再按 `MAX_SEGMENT_SEC` 切分；`_split_by_fixed_duration` 把不足最小时长的尾段并入前段（旧实现会直接丢弃），毫秒/采样点换算改整数；切分逻辑已全部收敛到 `AudioSplitter`（Nemotron 只提供语音区间，不再自己切段）
 - **句末标点补齐**（上游 `9b4ee87`/`1854214`/`ba1dba8` 简化版）：`app/services/asr/punctuation.py::restore_sentence_endings` 复用 FunASR CT-Transformer（`PUNC_MODEL`，CPU），离线结果缺句末标点时**只补一个标点**，不复制模型对正文的改写；英文/数字结尾用 ASCII 标点，结尾是逗号/分号则替换为句末标点，收尾引号保持在标点之后（`…"好的"` → `…"好的。"`）。批量一次调用（缺失段少于 1 条不加载模型），失败仅告警不阻断转写。开关 `ASR_RESTORE_SENTENCE_ENDING`（默认 true，全量列表长度不影响，实测 46 段 5min 音频 +0.2s）
 - 未搬运：上游「离线尾部 pad 二次解码」（`OFFLINE_TAIL_SAMPLES`，每段 2x 推理）——我们离线 `max_new_tokens=1024` 且分段 ≤60s，未见尾部截断，收益不确定不引入
 
