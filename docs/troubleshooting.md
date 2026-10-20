@@ -30,7 +30,7 @@
 ### 解决
 
 - **入口点**：不执行运行时大面积依赖同步（只保留 sqlite-vec 按需检查）
-- **依赖对齐**：不应在构建时或运行时降级——`uv.lock` 锁定的旧版本与当前 PyTorch 2.10 + CUDA 12.8 环境不兼容
+- **依赖对齐**：不应在构建时或运行时降级——`uv.lock` 锁定的版本与当前 PyTorch 2.13 + CUDA 13.0 环境不兼容
 - **正确的依赖策略**：新增依赖需**重新构建镜像**（含 `uv lock` 更新 lock），不在运行时改 venv
 - 详见 `CLAUDE.md`「新增 Python 依赖流程」和 `docs/deployment.md`「引擎加载容错说明」
 
@@ -111,7 +111,10 @@ Forced aligner produced reversed timestamps for token='，': start_ms=1120.0 end
 
 ## 2026-08-10：Docker → 本地 systemd 迁移问题
 
-### CAM++ 说话人分离模型加载失败（离线环境 400 错误）
+### CAM++ 声纹模型加载失败（离线环境 400 错误）
+
+> 2026-10 起离线**说话人分离**已改用本地 Nemotron-3（`NEMOTRON_MODEL_PATH`），
+> 本节仅适用于声纹命名用的 CAM++ SV 模型（`damo/speech_campplus_sv_zh-cn_16k-common`）。
 
 **现象**：
 ```
@@ -379,7 +382,7 @@ ERROR [core.py] AssertionError: Expected a cached item for mm_hash='48bfbe6c...'
 
 解决：启用 sleep 时固定传 `mm_processor_cache_gb=0`（`qwen3_vllm.py`）。该缓存位于 CPU 内存，禁用不影响显存。
 
-实测（本机 vLLM 0.19.0 + Confucius4-R2T2）：
+实测（vLLM 0.19/0.30 + Confucius4-R2T2，0.30 数据见文末条目 21~26）：
 
 ```
 load=11.0s → before-sleep infer ok → sleep=3.7s（释放 6.45GiB）→ wake=0.38s → after-wake infer ok

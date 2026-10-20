@@ -86,7 +86,7 @@ CPU 镜像使用 QwenASR Rust，并自动选择 `qwen3-asr-0.6b`。x86_64 需要
 **前置要求：**
 - Ubuntu 22.04+ / 同等 Linux 发行版
 - NVIDIA GPU + 驱动（显存 8GB+，推荐 12GB+ 以启用词级时间戳）
-- CUDA 12.8（按 PyTorch cu128 编译）
+- CUDA 13.0（按 PyTorch cu130 编译，驱动 ≥580）
 - [uv](https://docs.astral.sh/uv/) 包管理器（安装：`curl -LsSf https://astral.sh/uv/install.sh | sh`）
 - `ffmpeg` / `ffprobe`（音频解码兜底与容器时长探测；Docker 镜像已内置）：`sudo apt install -y ffmpeg`
 
@@ -412,12 +412,12 @@ docker build -t qwen3-asr:cpu-native -f Dockerfile.cpu \
   --build-arg QWENASR_RUST_TARGET_CPU=native \
   .
 
-# 构建默认 GPU 版本（CUDA 12.8 / PyTorch cu128）
+# 构建默认 GPU 版本（CUDA 13.0 / PyTorch cu130）
 docker build -t qwen3-asr:gpu-latest -f Dockerfile.gpu .
 
 # 构建 CUDA 12.6 版本
 docker build -t qwen3-asr:gpu-cu126 -f Dockerfile.gpu \
-  --build-arg PYTORCH_BASE_IMAGE=pytorch/pytorch:2.10.0-cuda12.6-cudnn9-runtime \
+  --build-arg PYTORCH_BASE_IMAGE=pytorch/pytorch:2.13.0-cuda12.6-cudnn9-runtime \
   --build-arg PYTORCH_CUDA_INDEX=https://download.pytorch.org/whl/cu126 \
   --build-arg CUDA_NVCC_PACKAGE=cuda-nvcc-12-6 \
   --build-arg TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9" \
@@ -425,7 +425,7 @@ docker build -t qwen3-asr:gpu-cu126 -f Dockerfile.gpu \
 
 # 构建 CUDA 13.0 版本
 docker build -t qwen3-asr:gpu-cu130 -f Dockerfile.gpu \
-  --build-arg PYTORCH_BASE_IMAGE=pytorch/pytorch:2.10.0-cuda13.0-cudnn9-runtime \
+  --build-arg PYTORCH_BASE_IMAGE=pytorch/pytorch:2.13.0-cuda13.0-cudnn9-runtime \
   --build-arg PYTORCH_CUDA_INDEX=https://download.pytorch.org/whl/cu130 \
   --build-arg CUDA_NVCC_PACKAGE=cuda-nvcc-13-0 \
   --build-arg TORCH_CUDA_ARCH_LIST="12.0+PTX" \
@@ -442,11 +442,11 @@ docker build -t qwen3-asr:gpu-cu130 -f Dockerfile.gpu \
 
 | 参数 | 默认值 | 用途 |
 |------|--------|------|
-| `PYTORCH_BASE_IMAGE` | `pytorch/pytorch:2.10.0-cuda12.8-cudnn9-runtime` | 选择 PyTorch/CUDA 基础镜像 |
-| `PYTORCH_CUDA_INDEX` | `https://download.pytorch.org/whl/cu128` | 选择 PyTorch wheel CUDA 后端 |
-| `CUDA_NVCC_PACKAGE` | `cuda-nvcc-12-8` | 安装匹配的 nvcc，用于 vLLM/FlashInfer JIT |
+| `PYTORCH_BASE_IMAGE` | `pytorch/pytorch:2.13.0-cuda13.0-cudnn9-runtime` | 选择 PyTorch/CUDA 基础镜像 |
+| `PYTORCH_CUDA_INDEX` | `https://download.pytorch.org/whl/cu130` | 选择 PyTorch wheel CUDA 后端 |
+| `CUDA_NVCC_PACKAGE` | `cuda-nvcc-13-0` | 安装匹配的 nvcc，用于 vLLM/FlashInfer JIT |
 | `TORCH_CUDA_ARCH_LIST` | `12.0+PTX` | 指定 JIT 编译目标架构 |
-| `VLLM_PACKAGE` | `vllm[audio]==0.19.0` | 覆盖 vLLM 包版本或来源 |
+| `VLLM_PACKAGE` | `vllm[audio]==0.30.0` | 覆盖 vLLM 包版本或来源 |
 
 ### 生产部署到其他服务器
 
@@ -534,24 +534,23 @@ uv run python -m app.utils.download_models --export-dir ./models
 /data1/models/
 ├── Confucius4-R2T2/            # 默认 ASR 主模型 ~3.9GB（bf16）
 ├── Qwen3-ForcedAligner-0.6B/   # 词级时间戳对齐器 ~1.8GB（懒加载）
+├── Nemotron-3-Diarization/     # 说话人分离 ~397MB（帧级/重叠/8 人）
 ├── huggingface/                # HuggingFace 缓存（HF_HOME）
 └── modelscope/
     └── hub/models/             # MODELSCOPE_CACHE=/data1/models/modelscope/hub
         ├── iic/speech_paraformer-large_...          # 中文实时流式 ~849MB
         ├── iic/punc_ct-transformer_...（×2）        # 离线/实时标点
-        ├── iic/speech_campplus_speaker-diarization_common  # 说话人分离
         ├── damo/speech_campplus_sv_...              # 声纹验证（声纹匹配）
-        ├── damo/speech_campplus-transformer_scl_... # 说话人聚类
         └── damo/speech_fsmn_vad_...                 # VAD ~69MB
 ```
 
 > 完整模型用途与使用场景见 README「模型清单」章节。换模型或换路径只改 `.env`
-> 的 `QWEN3_ASR_MODEL_PATH` / `QWEN3_FORCED_ALIGNER_PATH` / `MODELSCOPE_CACHE` /
-> `HF_HOME`（`models.json` 用 `${VAR:-default}` 占位符引用），无需改代码。
+> 的 `QWEN3_ASR_MODEL_PATH` / `QWEN3_FORCED_ALIGNER_PATH` / `NEMOTRON_MODEL_PATH` /
+> `MODELSCOPE_CACHE` / `HF_HOME`（`models.json` 用 `${VAR:-default}` 占位符引用），无需改代码。
 
 离线部署时，把上述 `/data1/models` 整体拷贝到目标机器，并在 `.env` 中把
-`QWEN3_ASR_MODEL_PATH` / `QWEN3_FORCED_ALIGNER_PATH` / `MODELSCOPE_CACHE` /
-`HF_HOME` 指向对应路径即可。
+`QWEN3_ASR_MODEL_PATH` / `QWEN3_FORCED_ALIGNER_PATH` / `NEMOTRON_MODEL_PATH` /
+`MODELSCOPE_CACHE` / `HF_HOME` 指向对应路径即可。
 
 ## 环境变量配置
 

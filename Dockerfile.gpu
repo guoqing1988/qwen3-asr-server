@@ -1,12 +1,12 @@
-ARG PYTORCH_BASE_IMAGE=pytorch/pytorch:2.10.0-cuda12.8-cudnn9-runtime
+ARG PYTORCH_BASE_IMAGE=pytorch/pytorch:2.13.0-cuda13.0-cudnn9-runtime
 FROM ${PYTORCH_BASE_IMAGE}
 
-ARG CUDA_NVCC_PACKAGE=cuda-nvcc-12-8
-ARG PYTORCH_CUDA_INDEX=https://download.pytorch.org/whl/cu128
-ARG TORCH_VERSION=2.10.0
-ARG TORCHAUDIO_VERSION=2.10.0
-ARG TORCHVISION_VERSION=0.25.0
-ARG VLLM_PACKAGE=vllm[audio]==0.19.0
+ARG CUDA_NVCC_PACKAGE=cuda-nvcc-13-0
+ARG PYTORCH_CUDA_INDEX=https://download.pytorch.org/whl/cu130
+ARG TORCH_VERSION=2.13.0
+ARG TORCHAUDIO_VERSION=2.11.0
+ARG TORCHVISION_VERSION=0.28.0
+ARG VLLM_PACKAGE=vllm[audio]==0.30.0
 ARG TORCH_CUDA_ARCH_LIST=12.0+PTX
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -45,7 +45,7 @@ RUN apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Install uv and sync default GPU dependencies from root project lock.
-# The image defaults to CUDA 12.8/cu128 for Blackwell-capable GPUs. Developers
+# The image defaults to CUDA 13.0/cu130 for Blackwell-capable GPUs. Developers
 # can rebuild with a different PyTorch CUDA backend by overriding:
 #   PYTORCH_BASE_IMAGE, PYTORCH_CUDA_INDEX, CUDA_NVCC_PACKAGE, TORCH_CUDA_ARCH_LIST.
 # Ubuntu 24.04 的 Python 是 externally managed，必须使用 venv

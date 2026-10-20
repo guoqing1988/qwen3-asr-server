@@ -10,8 +10,8 @@
 ---
 
 ![Static Badge](https://img.shields.io/badge/Python-3.10+-blue?logo=python)
-![Static Badge](https://img.shields.io/badge/Torch-2.10.0-%23EE4C2C?logo=pytorch&logoColor=white)
-![Static Badge](https://img.shields.io/badge/CUDA-12.8_default-%2376B900?logo=nvidia&logoColor=white)
+![Static Badge](https://img.shields.io/badge/Torch-2.13.0-%23EE4C2C?logo=pytorch&logoColor=white)
+![Static Badge](https://img.shields.io/badge/CUDA-13.0_default-%2376B900?logo=nvidia&logoColor=white)
 
 </div>
 
@@ -115,7 +115,7 @@ docker run -d --name qwen3-asr \
   quantatrisk/qwen3-asr:cpu-latest
 ```
 
-> **注意**: GPU 镜像默认使用 CUDA 12.8/cu128，以覆盖 Blackwell 等新架构 GPU。
+> **注意**: 运行时依赖已升级到 CUDA 13.0/cu130（torch 2.13.0 + vLLM 0.30.0）；Docker 镜像需按 `docs/deployment.md` 的新参数重建（旧 cu128 镜像与本轮代码不兼容）。
 > 开发者可通过 Docker build args 自行构建 CUDA 12.6、CUDA 13.0 或其他后端组合。
 > 当前 CPU 镜像已通过内置 QwenASR Rust backend 支持 `qwen3-asr-0.6b`。默认 CPU 镜像使用可分发 Rust 构建目标；只有自建且构建机/部署机 CPU 同构时才建议设置 `QWENASR_RUST_TARGET_CPU=native`。
 > CUDA vLLM 与 CPU Rust 路径下，`word_timestamps=true` 都会自动调用 forced aligner；当前实际后端为 `CUDA -> vLLM`、`CPU/macOS -> vendored QwenASR Rust`。
@@ -124,12 +124,12 @@ docker run -d --name qwen3-asr \
 **自定义 GPU 后端构建：**
 
 ```bash
-# 默认 GPU 构建：CUDA 12.8 / PyTorch cu128
-docker build -t qwen3-asr:gpu-cu128 -f Dockerfile.gpu .
+# 默认 GPU 构建：CUDA 13.0 / PyTorch cu130
+docker build -t qwen3-asr:gpu-cu130 -f Dockerfile.gpu .
 
 # CUDA 12.6 构建，用于旧部署环境
 docker build -t qwen3-asr:gpu-cu126 -f Dockerfile.gpu \
-  --build-arg PYTORCH_BASE_IMAGE=pytorch/pytorch:2.10.0-cuda12.6-cudnn9-runtime \
+  --build-arg PYTORCH_BASE_IMAGE=pytorch/pytorch:2.13.0-cuda12.6-cudnn9-runtime \
   --build-arg PYTORCH_CUDA_INDEX=https://download.pytorch.org/whl/cu126 \
   --build-arg CUDA_NVCC_PACKAGE=cuda-nvcc-12-6 \
   --build-arg TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9" \
@@ -137,7 +137,7 @@ docker build -t qwen3-asr:gpu-cu126 -f Dockerfile.gpu \
 
 # CUDA 13.0 构建，用于需要 CUDA 13 工具链的环境
 docker build -t qwen3-asr:gpu-cu130 -f Dockerfile.gpu \
-  --build-arg PYTORCH_BASE_IMAGE=pytorch/pytorch:2.10.0-cuda13.0-cudnn9-runtime \
+  --build-arg PYTORCH_BASE_IMAGE=pytorch/pytorch:2.13.0-cuda13.0-cudnn9-runtime \
   --build-arg PYTORCH_CUDA_INDEX=https://download.pytorch.org/whl/cu130 \
   --build-arg CUDA_NVCC_PACKAGE=cuda-nvcc-13-0 \
   --build-arg TORCH_CUDA_ARCH_LIST="12.0+PTX" \
@@ -165,7 +165,7 @@ docker compose up -d
 **系统要求:**
 
 - Python 3.10+
-- 默认 GPU 镜像要求 CUDA 12.8+；CUDA 12.6 / 13.0 可通过 Docker build args 自行构建
+- 默认 GPU 运行时要求 CUDA 13.0（驱动 ≥580）；Docker 镜像可用 build args 覆盖基础镜像
 - FFmpeg (音频格式转换)
 
 **安装步骤:**
@@ -174,7 +174,7 @@ docker compose up -d
 
 | 模式 | 命令 | 说明 |
 |------|------|------|
-| GPU（默认） | `uv sync` | 同步根目录 [pyproject.toml](pyproject.toml) 和 [uv.lock](uv.lock) 到 `.venv`，包含 CUDA 12.8/cu128 `torch/torchaudio/torchvision` |
+| GPU（默认） | `uv sync` | 同步根目录 [pyproject.toml](pyproject.toml) 和 [uv.lock](uv.lock) 到 `.venv`，包含 CUDA 13.0/cu130 `torch/torchaudio/torchvision` + `vllm[audio] 0.30.0` |
 | CPU（特化） | `./scripts/sync_cpu_env.sh` | 同步 [environments/cpu/pyproject.toml](environments/cpu/pyproject.toml) 对应的 CPU lock 到 `.venv` |
 
 ```bash
@@ -216,7 +216,7 @@ python start.py
 - 默认离线模型为 `qwen3-asr-confucius4-r2t2`（Confucius4-R2T2，CUDA vLLM 路径）
 - `word_timestamps=true` 在当前离线 CUDA 与 CPU Rust 路径下可用
 - WebSocket 流式路径当前不返回词级时间戳
-- CAM++ 说话人分离仍然必须保留，并继续跟随 `DEVICE`；在 CPU 上的主要热点仍是 speaker verification embedding
+- 说话人分离使用本地 Nemotron-3（帧级/重叠/8 人，推荐 GPU）；声纹 embedding（CAM++）仍跟随 `DEVICE`，CPU 上的主要热点是 speaker verification embedding
 
 ## API 接口
 
@@ -561,7 +561,7 @@ asyncio.run(main())
 
 | 运行环境 | 后端 | 离线转写 | WebSocket 流式 | 离线词级时间戳 | 流式词级时间戳 | 成熟度 |
 |---------|------|---------|----------------|----------------|----------------|--------|
-| Linux + NVIDIA GPU | 官方 vLLM 0.19.0 | ✅ | ✅ | ✅ | ❌ | 面向生产 |
+| Linux + NVIDIA GPU | 官方 vLLM 0.30.0 | ✅ | ✅ | ✅ | ❌ | 面向生产 |
 | CPU / macOS | QwenASR Rust | ✅ | ✅ | ✅（forced aligner） | ❌ | 推荐本地后端 |
 
 ## 支持离线的模型

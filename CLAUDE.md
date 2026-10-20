@@ -120,7 +120,7 @@ Qwen3-ASR 服务（GPU 版）：Confucius4-R2T2（vLLM bf16 默认，可选 llam
 - **镜像膨胀**：`uv pip install` 缓存 `/root/.cache/uv`（~21GB）未清理，Dockerfile 需 `uv cache clean`
 - **uv.lock 版本滞后**：lock 锁定的旧版 C 扩展与当前环境不兼容，**严禁运行时 `uv sync --frozen` 大面积降级**（会导致段错误）
 - 容器重建丢可写层：`docker exec` 装的包（pytest 等）需重装；`.env` 备份放 `.env.bak.*`
-- **CAM++ 离线加载**：`iic/speech_campplus_speaker-diarization_common/configuration.json` 里的子模型路径（`speaker_model` / `change_locator` / `vad_model`）可能残留旧路径（旧 Docker 路径，或缓存目录多一层 `models`）。`fix_camplusplus_config()` 启动时按路径末尾的 `<org>/<name>`（`damo` / `iic`）提取 model id，再用当前 `MODELSCOPE_CACHE` 重建，自动修正；若仍未修复，检查子模型目录权限（`sudo chown`）
+- **CAM++ 离线加载（仅声纹）**：说话人分离已改 Nemotron，以下只影响声纹命名用的 CAM++ SV 模型；`iic/speech_campplus_speaker-diarization_common/configuration.json` 里的子模型路径（`speaker_model` / `change_locator` / `vad_model`）可能残留旧路径（旧 Docker 路径，或缓存目录多一层 `models`）。`fix_camplusplus_config()` 启动时按路径末尾的 `<org>/<name>`（`damo` / `iic`）提取 model id，再用当前 `MODELSCOPE_CACHE` 重建，自动修正；若仍未修复，检查子模型目录权限（`sudo chown`）
 - **ModelScope 缓存路径**：库真实结构是 `$MODELSCOPE_CACHE/models/<id>`，`settings.MODELSCOPE_PATH` 已按此拼接（`MODELSCOPE_CACHE` 指到 `.../modelscope/hub` 即可）；模型统一放 `/data1/models`，不再放项目内 `models/`
 - **vLLM 0.30 流式退化（已知）**：`/v1/realtime` 在 vLLM 后端上短 chunk 会出现幻觉词/丢字（每轮 `language X<asr_text>` 头部需重新生成，动态 `max_tokens` 已预留 12 token，但仍不如 Q8 稳定）。实时场景请用 Q8（`ASR_ENGINE=llamacpp`，T8 append-only + 首轮静音跳过 + <0.8s 不落定），vLLM 后端以离线转写为主
 - **vLLM 0.30 显存口径变化**：默认开启 CUDA graph memory profiling，`gpu_memory_utilization=0.35` 等效 0.3346；配 `kv_cache_memory_bytes` 时会跳过 profiling，若显存仍不足会报 `No available memory for the cache blocks`（调大 `QWEN_GPU_MEMORY_UTILIZATION` 或减小 `QWEN_MAX_NUM_BATCHED_TOKENS`/encoder 预算）

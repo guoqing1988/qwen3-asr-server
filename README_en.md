@@ -10,8 +10,8 @@ Speech recognition API service centered on [Qwen3-ASR](https://github.com/QwenLM
 ---
 
 ![Static Badge](https://img.shields.io/badge/Python-3.10+-blue?logo=python)
-![Static Badge](https://img.shields.io/badge/Torch-2.10.0-%23EE4C2C?logo=pytorch&logoColor=white)
-![Static Badge](https://img.shields.io/badge/CUDA-12.8_default-%2376B900?logo=nvidia&logoColor=white)
+![Static Badge](https://img.shields.io/badge/Torch-2.13.0-%23EE4C2C?logo=pytorch&logoColor=white)
+![Static Badge](https://img.shields.io/badge/CUDA-13.0_default-%2376B900?logo=nvidia&logoColor=white)
 
 </div>
 
@@ -115,7 +115,7 @@ docker run -d --name qwen3-asr \
   quantatrisk/qwen3-asr:cpu-latest
 ```
 
-> **Note**: GPU images default to CUDA 12.8/cu128 for Blackwell-capable GPUs.
+> **Note**: Runtime dependencies are now CUDA 13.0/cu130 (torch 2.13.0 + vLLM 0.30.0); Docker images must be rebuilt with the new args in `docs/deployment.md` (old cu128 images are incompatible with this code).
 > Developers can rebuild `Dockerfile.gpu` for CUDA 12.6, CUDA 13.0, or another backend by overriding Docker build args.
 > CPU images now support `qwen3-asr-0.6b` via the bundled QwenASR Rust backend. The default CPU image uses a portable Rust target; set `QWENASR_RUST_TARGET_CPU=native` only for self-built, host-specific images.
 > On CUDA vLLM and CPU Rust, `word_timestamps=true` now triggers the forced aligner automatically.
@@ -124,12 +124,12 @@ docker run -d --name qwen3-asr \
 **Custom GPU backend builds:**
 
 ```bash
-# Default GPU build: CUDA 12.8 / PyTorch cu128
-docker build -t qwen3-asr:gpu-cu128 -f Dockerfile.gpu .
+# Default GPU build: CUDA 13.0 / PyTorch cu130
+docker build -t qwen3-asr:gpu-cu130 -f Dockerfile.gpu .
 
 # CUDA 12.6 build for older deployments
 docker build -t qwen3-asr:gpu-cu126 -f Dockerfile.gpu \
-  --build-arg PYTORCH_BASE_IMAGE=pytorch/pytorch:2.10.0-cuda12.6-cudnn9-runtime \
+  --build-arg PYTORCH_BASE_IMAGE=pytorch/pytorch:2.13.0-cuda12.6-cudnn9-runtime \
   --build-arg PYTORCH_CUDA_INDEX=https://download.pytorch.org/whl/cu126 \
   --build-arg CUDA_NVCC_PACKAGE=cuda-nvcc-12-6 \
   --build-arg TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9" \
@@ -137,7 +137,7 @@ docker build -t qwen3-asr:gpu-cu126 -f Dockerfile.gpu \
 
 # CUDA 13.0 build when your driver/toolchain requires it
 docker build -t qwen3-asr:gpu-cu130 -f Dockerfile.gpu \
-  --build-arg PYTORCH_BASE_IMAGE=pytorch/pytorch:2.10.0-cuda13.0-cudnn9-runtime \
+  --build-arg PYTORCH_BASE_IMAGE=pytorch/pytorch:2.13.0-cuda13.0-cudnn9-runtime \
   --build-arg PYTORCH_CUDA_INDEX=https://download.pytorch.org/whl/cu130 \
   --build-arg CUDA_NVCC_PACKAGE=cuda-nvcc-13-0 \
   --build-arg TORCH_CUDA_ARCH_LIST="12.0+PTX" \
@@ -165,7 +165,7 @@ docker compose up -d
 **System Requirements:**
 
 - Python 3.10+
-- CUDA 12.8+ for the default GPU image; CUDA 12.6 / 13.0 can be built with Docker args
+- CUDA 13.0 (driver >= 580) for the default GPU runtime; build args can override the base image
 - FFmpeg (audio format conversion)
 
 **Installation:**
@@ -174,7 +174,7 @@ Runtime dependency locks now default to the GPU stack at the repo root, with CPU
 
 | Mode | Command | Notes |
 |------|---------|-------|
-| GPU (default) | `uv sync` | Syncs the root [pyproject.toml](/opt/qwen3-asr/pyproject.toml) and [uv.lock](/opt/qwen3-asr/uv.lock) into `.venv`, including CUDA 12.8/cu128 `torch/torchaudio/torchvision` |
+| GPU (default) | `uv sync` | Syncs the root [pyproject.toml](/opt/qwen3-asr/pyproject.toml) and [uv.lock](/opt/qwen3-asr/uv.lock) into `.venv`, including CUDA 13.0/cu130 `torch/torchaudio/torchvision` + `vllm[audio] 0.30.0` |
 | CPU (specialized) | `./scripts/sync_cpu_env.sh` | Syncs the dedicated CPU lock in [environments/cpu/pyproject.toml](/opt/qwen3-asr/environments/cpu/pyproject.toml) into `.venv` |
 
 ```bash
@@ -530,7 +530,7 @@ Automatic long audio segmentation:
 
 | Runtime | Backend | Offline | WebSocket Streaming | Word Timestamps Offline | Word Timestamps Streaming | Maturity |
 |---------|---------|---------|---------------------|-------------------------|---------------------------|----------|
-| Linux + NVIDIA GPU | Official vLLM 0.19.0 | ✅ | ✅ | ✅ | ❌ | Production-oriented |
+| Linux + NVIDIA GPU | Official vLLM 0.30.0 | ✅ | ✅ | ✅ | ❌ | Production-oriented |
 | CPU / macOS | QwenASR Rust | ✅ | ✅ | ✅ (forced aligner) | ❌ | Recommended local fallback |
 
 ## Offline-Capable Models

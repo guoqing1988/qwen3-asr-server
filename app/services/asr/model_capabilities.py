@@ -78,33 +78,14 @@ _VAD_ASSETS = (
     ),
 )
 
+# 说话人分离已改用本地 Nemotron-3（见 get_enabled_qwen_huggingface_assets），
+# 这里只保留声纹命名需要的 CAM++ SV 模型。
 _DIARIZATION_ASSETS = (
-    ModelAsset(
-        source="modelscope",
-        model_id="iic/speech_campplus_speaker-diarization_common",
-        description="CAM++ Diarization",
-        required_patterns=(
-            "configuration.json",
-            "config.yaml",
-            "onnx/asd.onnx",
-            "onnx/face_recog_ir101.onnx",
-            "onnx/fqa.onnx",
-            "onnx/version-RFB-320.onnx",
-        ),
-        min_total_size_bytes=50_000_000,
-    ),
     ModelAsset(
         source="modelscope",
         model_id="damo/speech_campplus_sv_zh-cn_16k-common",
         description="CAM++ Speaker Verification",
         required_patterns=("configuration.json", "config.yaml", "campplus_cn_common.bin"),
-        min_total_size_bytes=10_000_000,
-    ),
-    ModelAsset(
-        source="modelscope",
-        model_id="damo/speech_campplus-transformer_scl_zh-cn_16k-common",
-        description="CAM++ Transformer",
-        required_patterns=("configuration.json", "campplus_cn_encoder.pt", "transformer_backend.pt"),
         min_total_size_bytes=10_000_000,
     ),
 )
@@ -192,6 +173,21 @@ def get_enabled_qwen_huggingface_assets(
                 min_total_size_bytes=500_000_000,
             )
         )
+    # 离线说话人分离用本地 Nemotron-3（不落 HF 缓存结构，直接校验目录内容）
+    assets.append(
+        ModelAsset(
+            source="huggingface",
+            model_id="nvidia/Nemotron-3-Diarization",
+            description="Nemotron-3 Diarization",
+            local_dir=settings.NEMOTRON_MODEL_PATH,
+            required_patterns=("config.json",),
+            alternative_required_patterns=(
+                ("model.safetensors",),
+                ("model.safetensors.index.json", "model-*.safetensors"),
+            ),
+            min_total_size_bytes=100_000_000,
+        )
+    )
     return assets
 
 
