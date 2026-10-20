@@ -11,6 +11,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# FlashInfer 未安装预编译 cubin 时会在首次推理前 JIT 编译，需要 PATH 中能找到
+# 当前虚拟环境的 ninja；systemd 不激活 venv，这里显式补上。
+_venv_bin = os.path.dirname(sys.executable)
+if _venv_bin and _venv_bin not in os.environ.get("PATH", "").split(os.pathsep):
+    os.environ["PATH"] = os.pathsep.join([_venv_bin, os.environ.get("PATH", "")])
+
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("TQDM_DISABLE", "1")

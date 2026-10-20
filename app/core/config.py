@@ -77,6 +77,9 @@ class Settings:
     # 服务端预设热词（英文逗号分隔，与请求热词合并后注入识别上下文；建议 ≤512 字符）
     ASR_DEFAULT_HOTWORDS: str = ""
 
+    # Nemotron-3 说话人分离模型目录（帧级、支持重叠，8 说话人上限）
+    NEMOTRON_MODEL_PATH: str = "/data1/models/Nemotron-3-Diarization"
+
     # 离线转写后补句末标点（R2T2 段尾常缺标点；复用 FunASR 标点模型）
     ASR_RESTORE_SENTENCE_ENDING: bool = True
 
@@ -229,6 +232,10 @@ class Settings:
         self.ASR_DEFAULT_HOTWORDS = (
             os.getenv("ASR_DEFAULT_HOTWORDS") or ""
         ).strip()
+
+        self.NEMOTRON_MODEL_PATH = os.path.expanduser(
+            os.getenv("NEMOTRON_MODEL_PATH", self.NEMOTRON_MODEL_PATH)
+        )
 
         self.ASR_RESTORE_SENTENCE_ENDING = (
             os.getenv("ASR_RESTORE_SENTENCE_ENDING", str(self.ASR_RESTORE_SENTENCE_ENDING))

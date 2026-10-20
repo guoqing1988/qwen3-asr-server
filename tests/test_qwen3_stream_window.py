@@ -113,14 +113,14 @@ class StreamVadDefaultsTest(unittest.TestCase):
             unfixed_token_num=1,
             max_new_tokens=2048,
         )
-        # 160ms(2560) + 160ms lookahead → 5120/1280*2 = 8
-        self.assertEqual(backend._stream_max_new_tokens(state, 5120), 8)
+        # 160ms(2560) + 160ms lookahead → 5120/1280*2 = 8，另加语言头部余量 12
+        self.assertEqual(backend._stream_max_new_tokens(state, 5120), 20)
         # 配置值小于动态值时，配置值生效（作为硬上限）
         state.max_new_tokens = 2
         self.assertEqual(backend._stream_max_new_tokens(state, 5120), 2)
         # <=0 表示不设上限
         state.max_new_tokens = 0
-        self.assertEqual(backend._stream_max_new_tokens(state, 5120), 8)
+        self.assertEqual(backend._stream_max_new_tokens(state, 5120), 20)
 
     def test_prefix_rolls_back_and_trims_pipe(self) -> None:
         class _Tokenizer:

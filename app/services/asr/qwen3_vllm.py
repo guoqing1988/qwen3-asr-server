@@ -7,7 +7,6 @@ import contextlib
 import importlib
 import importlib.util
 import logging
-import os
 import re
 import threading
 import time
@@ -112,6 +111,9 @@ def _build_stream_prefix(tokenizer: Any, raw_decoded: str, unfixed_token_num: in
             return ""
         rollback += 1
 
+
+# 流式每轮生成需覆盖的头部 token 预留量（`language X<asr_text>`）
+_STREAM_HEADER_TOKENS = 12
 
 _EN2ZH_PUNCT = {
     ",": "，",
@@ -700,7 +702,9 @@ class Qwen3VLLMBackend:
                 segments=[ASRSegmentResult(text=text, start_time=0.0, end_time=0.0)] if text else [],
             )
 
-        aligned = self.align_transcript(audio_path=audio_path, text=text, language=language, audio=audio)
+        aligned = self._align_with_retry(
+            audio_path=audio_path, text=text, language=language, audio=audio
+        )
         word_tokens = [
             WordToken(
                 text=str(item["text"]),
@@ -744,7 +748,7 @@ class Qwen3VLLMBackend:
                 if not word_timestamps:
                     results.append(ASRSegmentResult(text=text, start_time=0.0, end_time=0.0))
                     continue
-                aligned = self.align_transcript(
+                aligned = self._align_with_retry(
                     audio_path=audio_path,
                     text=text,
                     language=language,
@@ -767,6 +771,29 @@ class Qwen3VLLMBackend:
                     )
                 )
         return results
+
+
+    def _align_with_retry(
+        self,
+        *,
+        audio_path: str,
+        text: str,
+        language: Optional[str],
+        audio: np.ndarray,
+    ) -> list[dict[str, float | str]]:
+        """对齐器首次冷启动偶发返回不足时间戳：重试一次，仍失败则放弃词级。
+
+        只在词级时间戳缺失时降级，识别文本不受影响。
+        """
+        for attempt in range(2):
+            try:
+                return self.align_transcript(
+                    audio_path=audio_path, text=text, language=language, audio=audio
+                )
+            except Exception as exc:  # noqa: BLE001 - 对齐失败不阻断文本返回
+                logger.warning("Forced alignment failed (attempt %d): %s", attempt + 1, exc)
+        logger.warning("Forced alignment gave up; returning text without word timestamps")
+        return []
 
     def align_transcript(
         self,
@@ -877,7 +904,9 @@ class Qwen3VLLMBackend:
         ``max_new_tokens`` 配置值作为硬上限（<=0 表示不设上限），默认动态值
         约为 ``(chunk + lookahead) / 1280 * 2``，兼顾中英文（中文 token 更密）。
         """
-        dynamic = max(2, int(chunk_samples / 1280) * 2)
+        # vLLM 0.30 起每轮都需重新生成 `language X<asr_text>` 头部（约 8~12 token），
+        # 预留余量，否则动态上限被头部吃满、正文一个字都出不来。
+        dynamic = max(2, int(chunk_samples / 1280) * 2) + _STREAM_HEADER_TOKENS
         cap = int(state.max_new_tokens or 0)
         if cap > 0:
             return max(1, min(cap, dynamic))
@@ -887,10 +916,19 @@ class Qwen3VLLMBackend:
         self, state: VLLMRealtimeState, chunk_samples: int
     ) -> VLLMRealtimeState:
         # prefix = 已定稿的历史文本（见 _build_stream_prefix 说明）
+        # prefix 只用「已解析正文」重建，语言头部按已知语言重新拼：
+        # vLLM 0.30 起 skip_special_tokens 不再剔除 `<asr_text>`（added token），
+        # 直接回滚原始输出会把语言头部混进 prefix，导致每轮重复输出头部、
+        # 正文一个字都出不来。头部缺失时模型会自己重生成，因此必须显式补上。
         prefix = ""
-        if state.chunk_id >= state.unfixed_chunk_num and state.raw_decoded:
-            prefix = _build_stream_prefix(
-                self._tokenizer, state.raw_decoded, state.unfixed_token_num
+        if state.chunk_id >= state.unfixed_chunk_num and state.text:
+            header = (
+                f"language {state.language}<asr_text>"
+                if state.language
+                else "<asr_text>"
+            )
+            prefix = header + _build_stream_prefix(
+                self._tokenizer, state.text, state.unfixed_token_num
             )
 
         # 官方 R2T2：每轮生成量按当前 chunk 时长自适应（几 token 即可），

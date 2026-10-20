@@ -547,12 +547,16 @@ class LlamaCppQ8Backend:
         language: str | None,
         audio: np.ndarray,
     ) -> list[WordToken]:
-        try:
-            aligned = self.align_transcript(
-                audio_path=audio_path, text=text, language=language, audio=audio
-            )
-        except Exception as exc:  # noqa: BLE001 - 对齐失败不阻断文本返回
-            logger.warning("Q8 forced alignment failed: %s", exc)
+        aligned: list[dict[str, float | str]] = []
+        for attempt in range(2):
+            try:
+                aligned = self.align_transcript(
+                    audio_path=audio_path, text=text, language=language, audio=audio
+                )
+                break
+            except Exception as exc:  # noqa: BLE001 - 对齐失败不阻断文本返回
+                logger.warning("Q8 forced alignment failed (attempt %d): %s", attempt + 1, exc)
+        else:
             return []
         return [
             WordToken(

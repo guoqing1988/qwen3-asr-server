@@ -518,20 +518,17 @@ def preload_models() -> dict[str, Any]:
                 logger.error("实时标点符号模型加载失败: %s", e)
             progress.advance("已完成标点符号模型(实时)")
 
-        # 5. Preload the required speaker diarization model (CAM++).
-        progress.update("加载说话人分离模型(CAM++)")
+        # 5. Preload the Nemotron diarization model.
+        progress.update("加载说话人分离模型(Nemotron)")
         try:
-            from ..utils.speaker_diarizer import get_global_diarization_pipeline
+            from ..utils.speaker_diarizer import get_speaker_diarizer
 
-            diarization_pipeline = get_global_diarization_pipeline()
-            if diarization_pipeline:
-                result["speaker_diarization_model"]["loaded"] = True
-            else:
-                result["speaker_diarization_model"]["error"] = "说话人分离模型加载后返回None"
+            get_speaker_diarizer().warmup()
+            result["speaker_diarization_model"]["loaded"] = True
         except Exception as e:
             result["speaker_diarization_model"]["error"] = str(e)
-            logger.error("说话人分离模型(CAM++)加载失败: %s", e)
-        progress.advance("已完成说话人分离模型(CAM++)")
+            logger.error("说话人分离模型(Nemotron)加载失败: %s", e)
+        progress.advance("已完成说话人分离模型(Nemotron)")
 
     loaded_asr_count = sum(1 for status in result["asr_models"].values() if status["loaded"])
     total_asr_count = len(result["asr_models"])

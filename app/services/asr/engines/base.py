@@ -37,6 +37,7 @@ class ASRSegmentResult:
     end_time: float  # 结束时间（秒）
     speaker_id: Optional[str] = None  # 说话人ID（多说话人模式）
     word_tokens: Optional[List[WordToken]] = None  # 字词级时间戳（可选）
+    speaker_candidates: Optional[List[str]] = None  # 候选说话人（内部使用，不对外输出）
 
 
 @dataclass
@@ -145,28 +146,29 @@ class BaseASREngine(ABC):
             logger.info(f"{task_prefix}[transcribe_long_audio] 音频时长: {duration:.2f}秒")
 
             # 统一使用分段处理
-            speaker_segments = None
-            audio_segments = None
+            diarization = None
+            vad_segments = None
 
             if enable_speaker_diarization:
-                # 多说话人：使用说话人分离
-                from app.utils.speaker_diarizer import SpeakerDiarizer
+                # 多说话人：Nemotron 帧级分离，语音区间只作切分提示
+                from app.utils.speaker_diarizer import get_speaker_diarizer
 
-                logger.info(f"{task_prefix}使用说话人分离模式")
-                diarizer = SpeakerDiarizer()
-                speaker_segments = diarizer.split_audio_by_speakers(audio_path)
+                logger.info(f"{task_prefix}使用 Nemotron 说话人分离模式")
+                diarization = get_speaker_diarizer().diarize(audio_path)
+                vad_segments = diarization.speech_intervals_ms()
+                if not diarization.segments:
+                    logger.warning(
+                        f"{task_prefix}Nemotron 未检测到说话人活动，保留整段音频交给 ASR"
+                    )
 
-                if not speaker_segments:
-                    logger.warning(f"{task_prefix}说话人分离未检测到片段，fallback 到 VAD 分割")
-
-            if not speaker_segments:
-                # 单说话人：使用 VAD 分割
-                logger.info(f"{task_prefix}使用 VAD 分割模式")
-                splitter = AudioSplitter(device=self.device)
-                audio_segments = splitter.split_audio_file(audio_path)
+            # 转写始终按有界分段；未开说话人分离时用 VAD 检测语音区间
+            splitter = AudioSplitter(device=self.device)
+            audio_segments = splitter.split_audio_file(
+                audio_path, speech_segments=vad_segments
+            )
 
             # 选择要处理的片段
-            segments_to_process = speaker_segments if speaker_segments else audio_segments
+            segments_to_process = audio_segments
             if not segments_to_process:
                 raise DefaultServerErrorException("音频分割失败：未生成任何片段")
 
@@ -177,9 +179,11 @@ class BaseASREngine(ABC):
 
             # 使用批处理推理
             batch_size = settings.ASR_BATCH_SIZE
+            # 说话人归属按词级时间切分，启用 diarization 时强制对齐
+            needs_words = word_timestamps or diarization is not None
             logger.info(
                 f"{task_prefix}使用批处理推理，batch_size={batch_size}, "
-                f"word_timestamps={word_timestamps}"
+                f"word_timestamps={needs_words}"
             )
 
             for batch_start in range(0, len(segments_to_process), batch_size):
@@ -200,7 +204,7 @@ class BaseASREngine(ABC):
                         enable_punctuation=enable_punctuation,
                         enable_itn=enable_itn,
                         sample_rate=sample_rate,
-                        word_timestamps=word_timestamps,
+                        word_timestamps=needs_words,
                     )
 
                     for seg, result in zip(batch_segments, batch_results):
@@ -213,7 +217,7 @@ class BaseASREngine(ABC):
                                     start_time=start_sec,
                                     end_time=end_sec,
                                     speaker_id=getattr(seg, "speaker_id", None),
-                                    word_tokens=result.word_tokens if word_timestamps else None,
+                                    word_tokens=result.word_tokens if needs_words else None,
                                 )
                             )
                             all_texts.append(result.text)
@@ -228,13 +232,39 @@ class BaseASREngine(ABC):
 
             # 清理临时文件（独立清理，避免条件遗漏）
             try:
-                if speaker_segments:
-                    from app.utils.speaker_diarizer import SpeakerDiarizer
-                    SpeakerDiarizer.cleanup_segments(speaker_segments)
                 if audio_segments:
                     AudioSplitter.cleanup_segments(audio_segments)
             except Exception as e:
                 logger.warning(f"清理临时文件时出错: {e}")
+
+            if needs_words:
+                logger.info(
+                    "%s词级对齐结果：%s 段，共 %s 个词",
+                    task_prefix,
+                    len(results),
+                    sum(len(r.word_tokens or []) for r in results),
+                )
+
+            # 说话人归属：按词级时间把 ASR 块切到说话人，再合并成段落
+            if diarization is not None and results:
+                from app.services.asr.speaker_attribution import (
+                    assign_speakers,
+                    consolidate_speaker_turns,
+                )
+
+                results = consolidate_speaker_turns(
+                    assign_speakers(results, diarization)
+                )
+                all_texts = [result.text for result in results if result.text]
+                if not word_timestamps:
+                    for result in results:
+                        result.word_tokens = None
+                logger.info(
+                    "%s说话人归属完成：%s 个段落，%s 个说话人",
+                    task_prefix,
+                    len(results),
+                    len({r.speaker_id for r in results if r.speaker_id}),
+                )
 
             full_text = "\n".join(all_texts)
 
