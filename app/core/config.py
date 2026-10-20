@@ -80,6 +80,14 @@ class Settings:
     # Nemotron-3 说话人分离模型目录（帧级、支持重叠，8 说话人上限）
     NEMOTRON_MODEL_PATH: str = "/data1/models/Nemotron-3-Diarization"
 
+    # 词级时间戳来源：forced = forced aligner（声学对齐，准确）；uniform = 按时长均分（兜底）
+    ALIGNMENT_MODE: str = "forced"
+
+    # 实时转录（/v1/realtime）是否附带给说话人标签（Nemotron 流式，约 0.4GB 显存常驻）
+    REALTIME_SPEAKER_LABELS: bool = True
+    # 等待说话人标签的超时（秒）；超时则 completed.speaker 为 null
+    REALTIME_SPEAKER_LABEL_TIMEOUT: float = 2.0
+
     # 离线转写后补句末标点（R2T2 段尾常缺标点；复用 FunASR 标点模型）
     ASR_RESTORE_SENTENCE_ENDING: bool = True
 
@@ -235,6 +243,24 @@ class Settings:
 
         self.NEMOTRON_MODEL_PATH = os.path.expanduser(
             os.getenv("NEMOTRON_MODEL_PATH", self.NEMOTRON_MODEL_PATH)
+        )
+
+        self.ALIGNMENT_MODE = (
+            os.getenv("ALIGNMENT_MODE", self.ALIGNMENT_MODE).strip().lower() or "forced"
+        )
+        if self.ALIGNMENT_MODE not in {"forced", "uniform"}:
+            self.ALIGNMENT_MODE = "forced"
+
+        self.REALTIME_SPEAKER_LABELS = (
+            os.getenv("REALTIME_SPEAKER_LABELS", str(self.REALTIME_SPEAKER_LABELS))
+            .strip()
+            .lower()
+            not in {"0", "false", "no", "off"}
+        )
+        self.REALTIME_SPEAKER_LABEL_TIMEOUT = float(
+            os.getenv(
+                "REALTIME_SPEAKER_LABEL_TIMEOUT", str(self.REALTIME_SPEAKER_LABEL_TIMEOUT)
+            )
         )
 
         self.ASR_RESTORE_SENTENCE_ENDING = (

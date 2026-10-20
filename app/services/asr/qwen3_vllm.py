@@ -18,9 +18,11 @@ import numpy as np
 import torch
 
 from app.infrastructure import resolve_huggingface_snapshot_dir
+from app.core.config import settings
 from app.utils.text_processing import normalize_asr_text
 
 from .engines import ASRRawResult, ASRSegmentResult, WordToken
+from .uniform_alignment import uniform_word_timestamps
 
 logger = logging.getLogger(__name__)
 
@@ -702,6 +704,19 @@ class Qwen3VLLMBackend:
                 segments=[ASRSegmentResult(text=text, start_time=0.0, end_time=0.0)] if text else [],
             )
 
+        if settings.ALIGNMENT_MODE == "uniform":
+            word_tokens = uniform_word_timestamps(text, len(audio) / _DEFAULT_SAMPLE_RATE)
+            return ASRRawResult(
+                text=text,
+                segments=[
+                    ASRSegmentResult(
+                        text=text,
+                        start_time=word_tokens[0].start_time if word_tokens else 0.0,
+                        end_time=word_tokens[-1].end_time if word_tokens else 0.0,
+                        word_tokens=word_tokens or None,
+                    )
+                ],
+            )
         aligned = self._align_with_retry(
             audio_path=audio_path, text=text, language=language, audio=audio
         )
@@ -747,6 +762,19 @@ class Qwen3VLLMBackend:
                 text = normalize_asr_text(transcript.text, enable_itn=enable_itn)
                 if not word_timestamps:
                     results.append(ASRSegmentResult(text=text, start_time=0.0, end_time=0.0))
+                    continue
+                if settings.ALIGNMENT_MODE == "uniform":
+                    uniform = uniform_word_timestamps(
+                        text, len(audio) / _DEFAULT_SAMPLE_RATE
+                    )
+                    results.append(
+                        ASRSegmentResult(
+                            text=text,
+                            start_time=uniform[0].start_time if uniform else 0.0,
+                            end_time=uniform[-1].end_time if uniform else 0.0,
+                            word_tokens=uniform or None,
+                        )
+                    )
                     continue
                 aligned = self._align_with_retry(
                     audio_path=audio_path,

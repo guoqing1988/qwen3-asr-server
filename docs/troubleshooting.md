@@ -109,6 +109,21 @@ Forced aligner produced reversed timestamps for token='，': start_ms=1120.0 end
 
 **排查命令**：`.venv/bin/python -m pytest tests/test_qwen3_align.py -v`（切分、单调化、align 解析链路全覆盖）
 
+## 2026-10-20：实时说话人标签与可配置对齐
+
+### `/v1/realtime` 的 `completed.speaker` 一直是 null
+
+**排查顺序**：
+1. `session.created` 里 `speaker_diarization` 为 `false` → `REALTIME_SPEAKER_LABELS=false`（或模型缺失）。
+2. 为 `true` 但标签仍 null：
+   - **客户端一次性快速灌音频后立刻停止**：Nemotron 流式需要约 1s 右上下文，段末音频永远补不齐。会话层会在 `REALTIME_SPEAKER_LABEL_TIMEOUT`（2s）到期时用 `flush` 把尾部音频按最后一块推理一次，因此末段也能拿到标签（精度略降）；若仍为 null，说明段内没有检测到说话人活动。
+   - 日志出现「实时说话人分离不可用」→ `NEMOTRON_MODEL_PATH` 缺失或加载失败，转写照常、标签降级为 null。
+3. 只有一条 WebSocket 会话却看到 `说话人1` 编号重新开始 → 该段触发过 `flush` 重建流；正常实时发送（音频持续流入）不会发生。
+
+### `ALIGNMENT_MODE=uniform` 后说话人归属变差
+
+`uniform` 用字/词均分时长替代声学对齐，说话人归属依赖词级时间，精度必然下降（尤其语速不均、长短句混排）。要准确归属就保持默认 `ALIGNMENT_MODE=forced`，只在没有 aligner / 显存紧张时用 `uniform`。
+
 ## 2026-08-10：Docker → 本地 systemd 迁移问题
 
 ### CAM++ 声纹模型加载失败（离线环境 400 错误）

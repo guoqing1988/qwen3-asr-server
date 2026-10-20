@@ -20,6 +20,7 @@
 - **混合运行时栈** - 离线推理由自动选择的 Qwen3-ASR 提供，WebSocket 流式由 Paraformer realtime 能力提供
 - **多语言识别** - Qwen3-ASR 支持 52 种语言与方言，中英日韩等自动检测
 - **说话人分离** - 基于 Nemotron-3-Diarization（帧级 10ms、支持重叠、最多 8 人）自动识别多说话人，返回说话人标记
+- **实时说话人标签** - `/v1/realtime` 与 ASR 并行跑 Nemotron 流式分离，每段 `completed` 事件附带 `speaker`（约 1s 延迟）
 - **声纹注册与说话人命名** - 为说话人注册声纹样本后，转写结果的 `speaker_id` 自动替换为显示名
 - **OpenAI API 兼容** - 支持 `/v1/audio/transcriptions` 端点，可直接使用 OpenAI SDK
 - **阿里云 API 兼容** - 支持阿里云语音识别 RESTful API 和 WebSocket 流式协议
@@ -325,7 +326,7 @@ curl -X POST "http://localhost:9101/v1/audio/transcriptions" \
 | `audio_address`              | string | `https://media.cdn.vect.one/podcast_demo.mp4`（文档示例） | 音频/视频 URL（可选；若同时上传内容则忽略） |
 | `sample_rate`                | int    | `16000`          | 采样率                                |
 | `enable_speaker_diarization` | bool   | `true`           | 启用说话人分离                        |
-| `word_timestamps`            | bool   | `false`          | 返回后端支持的字词级时间戳；Qwen CUDA vLLM 与 CPU Rust 在启用时会自动调用 forced aligner |
+| `word_timestamps`            | bool   | `false`          | 返回后端支持的字词级时间戳；默认走 forced aligner（`ALIGNMENT_MODE=forced`），设为 `uniform` 时按字均分时长兜底 |
 | `vocabulary_id`              | string | -                  | 无权重热词上下文（英文逗号分隔，如：`词1,词2,Bank of China`），与 `ASR_DEFAULT_HOTWORDS` 预设热词合并生效；未传时用预设热词兜底。**Deprecated：** 数字权重不受支持，传入时会被忽略。 |
 
 **使用示例:**
@@ -386,13 +387,14 @@ curl -X POST "http://localhost:9101/stream/v1/asr?enable_speaker_diarization=tru
 |---|---|---|
 | 交互方式 | 长连接，边传音频边收结果 | 一次性提交完整音频，同步等待 |
 | 结果 | 增量 partial → `segment_end` 确认 | 完整结果（分段 + 时间戳） |
-| 说话人分离 | ❌ | ✅ |
+| 说话人分离 | ⚠️ 仅 `/v1/realtime`（整段 `speaker` 标签，无分段结构） | ✅（分段 + 说话人） |
 | 声纹命名 | ❌ | ✅ |
 | 词级时间戳 | ❌ | ✅ |
 | 适合场景 | 实时字幕、语音助手、对讲 | 录音转写、会议纪要、事后分析 |
 
-需要"实时 + 说话人"时使用双请求模式：WebSocket 实时出字幕，结束后把
-完整录音再发离线接口，获得带说话人分离/声纹名的分段结果。
+`/v1/realtime` 的 `conversation.item.input_audio_transcription.completed` 事件带
+`speaker` 字段（`说话人1`/`说话人2`…，未知或分离失败为 `null`），可直接显示"谁在说"；
+需要声纹命名与分段结构时，会话结束后再把录音发离线接口。
 
 鉴权：浏览器端 WebSocket 无法发送自定义请求头，通过查询参数传 API key
 （`?token=YOUR_KEY` 或 `x_nls_token`）；未配置 `API_KEY` 时免鉴权。

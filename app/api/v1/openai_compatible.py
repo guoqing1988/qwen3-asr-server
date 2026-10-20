@@ -85,6 +85,8 @@ class VerboseTranscriptionResponse(BaseModel):
     text: str
     segments: List[TranscriptionSegment] = Field(default_factory=list)
     words: Optional[List[TranscriptionWord]] = None
+    # 词级时间戳来源：forced_alignment（声学对齐）/ uniform_fallback（按时长均分）
+    word_timestamp_method: Optional[str] = None
 
 
 class ModelObject(BaseModel):
@@ -206,6 +208,11 @@ def build_transcription_payload(
             text=asr_result.text,
             segments=segments,
             words=words if words else None,
+            word_timestamp_method=(
+                "uniform_fallback" if settings.ALIGNMENT_MODE == "uniform" else "forced_alignment"
+            )
+            if words
+            else None,
         ).model_dump()
     elif response_format == ResponseFormat.JSON:
         payload = {"text": asr_result.text}

@@ -516,6 +516,28 @@ class Qwen3ASREngine(BaseASREngine):
                 enable_itn=enable_itn,
                 sample_rate=sample_rate,
             )
+            if (
+                kwargs.get("word_timestamps", False)
+                and settings.ALIGNMENT_MODE == "uniform"
+                and text.strip()
+            ):
+                import soundfile as sf
+
+                from .uniform_alignment import uniform_word_timestamps
+
+                word_tokens = uniform_word_timestamps(text, sf.info(audio_path).duration)
+                if word_tokens:
+                    return ASRRawResult(
+                        text=text,
+                        segments=[
+                            ASRSegmentResult(
+                                text=text,
+                                start_time=word_tokens[0].start_time,
+                                end_time=word_tokens[-1].end_time,
+                                word_tokens=word_tokens,
+                            )
+                        ],
+                    )
             if kwargs.get("word_timestamps", False):
                 word_tokens = [
                     WordToken(
@@ -591,7 +613,16 @@ class Qwen3ASREngine(BaseASREngine):
             )
 
             word_tokens_by_idx: dict[int, list[WordToken]] = {}
-            if word_timestamps:
+            if word_timestamps and settings.ALIGNMENT_MODE == "uniform":
+                from .uniform_alignment import uniform_word_timestamps
+
+                word_tokens_by_idx = {
+                    idx: uniform_word_timestamps(
+                        texts.get(idx, ""), float(seg.end_sec - seg.start_sec)
+                    )
+                    for idx, seg in valid
+                }
+            elif word_timestamps:
                 word_tokens_by_idx = self._run_rust_align_stage(
                     valid_segments=valid,
                     texts=texts,

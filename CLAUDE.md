@@ -73,6 +73,7 @@ Qwen3-ASR 服务（GPU 版）：Confucius4-R2T2（vLLM bf16 默认，可选 llam
 - 对外的实时端点统一为 **`ws /v1/realtime`**（`intent=transcription`，OpenAI Realtime transcription 子集），实现在 `app/services/asr/openai_realtime.py` + `app/api/v1/realtime.py`；识别复用 `Qwen3ASREngine` 流式接口、FireRedVAD 断句、two-pass 定稿与热词合并
 - 客户端事件：`session.update`（`format.rate` 16k/24k、`transcription.{prompt,language,keywords}`、`turn_detection` 为 `null` 或 `server_vad`）、`input_audio_buffer.append`（base64 PCM16，单次 ≤10s）、`commit`、`clear`
 - 服务端事件：`session.created/updated`、`conversation.item.input_audio_transcription.delta/completed/failed`、`input_audio_buffer.committed/cleared`、`error`
+- **实时说话人标签**（`REALTIME_SPEAKER_LABELS`，默认开）：`app/services/asr/realtime_speakers.py::SpeakerStream` 用 Nemotron 流式（10ms 帧、`speaker_cache` 跨块复用）与 ASR 并行消费同一路 PCM；每段 `completed` 事件带 `speaker`（`说话人N` / `null`），标签比文本晚约 1s（Nemotron 右上下文）。音频持续流入时无需等待；客户端 commit 不再发音频时用 `flush` 把尾部音频按最后一块推理一次（精度略降），随后该流终结并在下一段重建（说话人编号 `names` 继承）。等待上限 `REALTIME_SPEAKER_LABEL_TIMEOUT`（2s），分离失败只让标签为 null，绝不影响转写
 - 鉴权：`Authorization: Bearer`、`?token=`、子协议 `openai-insecure-api-key.<key>`；握手回 `subprotocol=realtime`
 - 流式 partial **关闭 ITN**（保证 delta 单调，避免 `一`→`1` 改写前缀），`.completed` 才做 ITN/标点；`server_vad` 模式句尾静音自动落定，连续讲话按 `QWEN_STREAM_SEGMENT_MAX_SEC`（60s）兜底
 - **`ws /ws/v1/asr/qwen` 已废弃**：连接后返回 `{"type":"error","error":{"code":"endpoint_deprecated"}}` 并 `close(1008)`；`/ws/v1/asr`、`/ws/v1/asr/funasr`（FunASR 阿里云协议）保持不变
@@ -91,6 +92,7 @@ Qwen3-ASR 服务（GPU 版）：Confucius4-R2T2（vLLM bf16 默认，可选 llam
 - **懒加载自动重试**：引擎创建失败重试 3 次（间隔 5s/10s）
 - **降级启动**：qwen3 预加载失败不阻断启动，funasr 兜底
 - **forced aligner 懒加载**：aligner（另一个 vLLM 实例，约 3GB）不再在启动时预热，只在 `word_timestamps=true` 的请求到来时才加载（`QWEN_WARMUP_FORCED_ALIGNER=false`）——这是启动显存从 16GB 降到 6GB 的关键
+- **对齐模式 `ALIGNMENT_MODE`**：`forced`（默认，声学对齐）| `uniform`（`app/services/asr/uniform_alignment.py` 按字/词均分时长，不加载 aligner，省约 6GB 显存但精度低）；`verbose_json` 用 `word_timestamp_method`（`forced_alignment` / `uniform_fallback`）标明来源。注意 `uniform` 下说话人归属所用的词级时间也是均分的，归属精度会下降
 - **空闲释放（两级，sleep mode 默认开启）**：
   - 一级 `QWEN_IDLE_UNLOAD_TIMEOUT`（秒，当前 `.env` 设 **15**）：`sleep`——权重 offload 到 CPU、丢弃 KV cache，**vLLM 进程常驻**，下次请求 `wake_up` 仅 **0.1~0.4s**（对比销毁重建 11~21s）
   - 二级 `QWEN_SHUTDOWN_AFTER_S`（秒，默认 **600**，0 禁用）：仍空闲则彻底 `shutdown` 子进程，把 sleep 残留的 CUDA context（两引擎合计约 1.9GB）一并归还

@@ -20,6 +20,7 @@ Speech recognition API service centered on [Qwen3-ASR](https://github.com/QwenLM
 - **Hybrid Runtime Stack** - Uses auto-selected Qwen3-ASR for offline inference and Paraformer realtime for websocket streaming
 - **Multilingual Recognition** - Qwen3-ASR supports 52 languages and dialects with automatic detection (zh/en/ja/ko/...)
 - **Speaker Diarization** - Frame-level (10 ms) multi-speaker identification with Nemotron-3-Diarization (overlap-aware, up to 8 speakers)
+- **Realtime speaker labels** - `/v1/realtime` runs Nemotron streaming beside ASR and adds `speaker` to every `completed` event (~1 s behind the text)
 - **Voiceprint Registration & Naming** - Register voiceprint samples per speaker; matched `speaker_id` values are replaced with display names
 - **OpenAI API Compatible** - Supports `/v1/audio/transcriptions` endpoint, works with OpenAI SDK
 - **Alibaba Cloud API Compatible** - Supports Alibaba Cloud Speech RESTful API and WebSocket streaming protocol
@@ -268,7 +269,7 @@ word-level timestamps. True streaming lives on the WebSocket endpoints below:
 | `audio_address` | string | Optional | Audio/video URL (HTTP/HTTPS). Ignored when `file` is also provided |
 | `language` | string | Auto-detect | Language code (zh/en/ja) |
 | `enable_speaker_diarization` | bool | `true` | Enable speaker diarization |
-| `word_timestamps` | bool | `false` | Return word-level timestamps when the backend supports them. Qwen CUDA vLLM and CPU Rust automatically use the forced aligner when enabled. |
+| `word_timestamps` | bool | `false` | Word-level timestamps. Uses the forced aligner by default (`ALIGNMENT_MODE=forced`); `ALIGNMENT_MODE=uniform` splits segment duration evenly as a low-memory fallback. |
 | `response_format` | string | `verbose_json` | Output format |
 | `prompt` | string | optional | Hotword context (comma-separated, ≤512 chars), merged with the `ASR_DEFAULT_HOTWORDS` preset before being injected into the recognition context |
 | `temperature` | float | `0` | Sampling temperature (reserved) |
@@ -325,7 +326,7 @@ curl -X POST "http://localhost:9101/v1/audio/transcriptions" \
 | `audio_address` | string | `https://media.cdn.vect.one/podcast_demo.mp4` (docs example) | Audio/video URL (optional; ignored when body content is uploaded) |
 | `sample_rate` | int | `16000` | Sample rate |
 | `enable_speaker_diarization` | bool | `true` | Enable speaker diarization |
-| `word_timestamps` | bool | `false` | Return word-level timestamps when the backend supports them. Qwen CUDA vLLM and CPU Rust automatically use the forced aligner when enabled. |
+| `word_timestamps` | bool | `false` | Word-level timestamps. Uses the forced aligner by default (`ALIGNMENT_MODE=forced`); `ALIGNMENT_MODE=uniform` splits segment duration evenly as a low-memory fallback. |
 | `vocabulary_id` | string | - | Hotword context (comma-separated, for example: `word1,word2,Bank of China`), merged with the `ASR_DEFAULT_HOTWORDS` preset; falls back to the preset when omitted. **Deprecated:** numeric weights are unsupported and ignored. |
 
 **Usage Examples:**
@@ -387,7 +388,7 @@ fundamental difference from the offline HTTP endpoints:
 |---|---|---|
 | Interaction | Long-lived connection, send audio while receiving results | Submit the full audio once, wait synchronously |
 | Results | Partial increments → `segment_end` confirmation | Full result (segments + timestamps) |
-| Speaker diarization | ❌ | ✅ |
+| Speaker diarization | ⚠️ `/v1/realtime` only (whole-utterance `speaker` label, no segment structure) | ✅ |
 | Voiceprint naming | ❌ | ✅ |
 | Word-level timestamps | ❌ | ✅ |
 | Best for | Live captions, voice assistants, intercom | Recording transcription, meeting minutes, post-analysis |

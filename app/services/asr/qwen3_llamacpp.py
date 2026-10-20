@@ -23,6 +23,8 @@ import numpy as np
 import requests
 
 from app.core.config import settings
+
+from .uniform_alignment import uniform_word_timestamps
 from app.services.asr.engines.base import ASRRawResult, ASRSegmentResult, WordToken
 from app.utils.text_processing import normalize_asr_text
 
@@ -547,6 +549,9 @@ class LlamaCppQ8Backend:
         language: str | None,
         audio: np.ndarray,
     ) -> list[WordToken]:
+        if settings.ALIGNMENT_MODE == "uniform":
+            # 兜底模式：不跑 aligner，按时长均分（无 aligner/显存紧张时也能返回 words）
+            return uniform_word_timestamps(text, len(audio) / _SAMPLE_RATE)
         aligned: list[dict[str, float | str]] = []
         for attempt in range(2):
             try:

@@ -10,7 +10,7 @@ import logging
 import math
 import threading
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import librosa
 import numpy as np
@@ -109,6 +109,18 @@ class SpeakerDiarizer:
             logger.info(
                 "Loaded Nemotron diarization: device=%s, frame=%.3fs", device, frame_seconds
             )
+
+    def streaming_parts(self) -> tuple[Any, Any]:
+        """返回 (model, processor) 供流式推理使用（懒加载，复用同一实例）。
+
+        流式推理必须用同一个 processor 提供的 chunk 边界
+        （`audio_chunk_start` / `num_samples_*_audio_chunk`），否则帧对不齐。
+        """
+        self.warmup()
+        with self._lock:
+            if self._model is None or self._processor is None:
+                raise RuntimeError("Diarization model is not loaded")
+            return self._model, self._processor
 
     def diarize(self, audio_path: str) -> DiarizationResult:
         try:

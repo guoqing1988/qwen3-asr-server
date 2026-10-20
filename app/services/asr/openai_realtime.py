@@ -22,6 +22,7 @@ import numpy as np
 from fastapi import WebSocket, WebSocketDisconnect
 
 from app.core.config import settings
+from .realtime_speakers import SpeakerStream
 from app.core.executor import run_sync
 from app.services.asr.model_selection import validate_realtime_model_id
 from app.services.asr.qwen3_engine import Qwen3ASREngine, Qwen3StreamingState
@@ -103,6 +104,12 @@ class OpenAIRealtimeSession:
         self._item_id = _item_id()
         self._partial_text = ""
         self._closed = False
+        # 实时说话人标签（Nemotron 与 ASR 并行消费同一路 PCM）
+        self._speakers: SpeakerStream | None = (
+            SpeakerStream() if settings.REALTIME_SPEAKER_LABELS else None
+        )
+        self._speaker_index = 0
+        self._segment_start_sample = 0
 
     # ------------------------------------------------------------------
     # 引擎与段状态
@@ -151,6 +158,20 @@ class OpenAIRealtimeSession:
         if self._vad is not None:
             self._vad.reset()
         self._state = self._new_state()
+        # 下一段起点 = 已喂入总量 - 尚未消费的 buffer（该部分属于下一段）
+        if self._speakers is not None:
+            if self._speakers.flushed:
+                # flush 后流已终结（末段收尾推理用掉了剩余音频）：重建并沿用编号。
+                # buffer 中未消费的音频属于下一段，补喂给新流以保持时间轴对齐。
+                names = self._speakers.names
+                self._speakers = SpeakerStream(names)
+                if self._buffer.size:
+                    self._speakers.feed(
+                        (np.clip(self._buffer, -1.0, 1.0) * 32767.0)
+                        .astype("<i2")
+                        .tobytes()
+                    )
+            self._segment_start_sample = self._speakers.samples - len(self._buffer)
 
     def _text(self, text: str, *, itn: bool) -> str:
         return normalize_asr_text(text, enable_itn=itn)
@@ -178,6 +199,7 @@ class OpenAIRealtimeSession:
             "object": "realtime.transcription_session",
             "id": "sess_" + self._task_id,
             "model": self._config.model,
+            "speaker_diarization": self._speakers is not None,
             "audio": {
                 "input": {
                     "format": {"type": "audio/pcm", "rate": self._config.input_rate},
@@ -340,6 +362,13 @@ class OpenAIRealtimeSession:
         if audio.size == 0:
             return
         engine = await self._ensure_engine()
+        if self._speakers is not None:
+            # Nemotron 与 ASR 并行：把同一路 16k PCM16 喂入流式分离，
+            # 并立刻推进已完整 chunk 的推理（否则会积压到定稿时一次性补齐而超时）
+            self._speakers.feed(
+                (np.clip(audio, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
+            )
+            await self._speakers.advance()
         self._buffer = np.concatenate([self._buffer, audio.astype(np.float32)])
         if float(np.sqrt(np.mean(audio**2))) >= _VOICE_RMS_THRESHOLD:
             self._silence_samples = 0
@@ -411,6 +440,16 @@ class OpenAIRealtimeSession:
         engine = self._engine
         if engine is None or self._state is None or self._state.chunk_count == 0:
             return None
+        speaker_index = self._speaker_index
+        speaker: str | None = None
+        if self._speakers is not None and self._segment_audio.size > 0:
+            end_sample = self._segment_start_sample + int(self._segment_audio.size)
+            self._speakers.utterance(
+                speaker_index,
+                round(self._segment_start_sample * 1000 / _SAMPLE_RATE),
+                round(end_sample * 1000 / _SAMPLE_RATE),
+            )
+            self._speaker_index += 1
         try:
             self._state = await run_sync(engine.finish_streaming_transcribe, self._state)
             text = self._text(self._state.last_text or "", itn=True)
@@ -441,12 +480,18 @@ class OpenAIRealtimeSession:
             return None
         if len(text.strip()) < 2:
             return None
+        if self._speakers is not None and self._segment_audio.size > 0:
+            # two-pass 重转已耗时，标签大概率就绪；超时/失败则为 null
+            speaker = await self._speakers.label(
+                speaker_index, settings.REALTIME_SPEAKER_LABEL_TIMEOUT
+            )
         await self._send(
             {
                 "type": "conversation.item.input_audio_transcription.completed",
                 "item_id": self._item_id,
                 "content_index": 0,
                 "transcript": text,
+                "speaker": speaker,
             }
         )
         logger.info("[%s] Segment completed (%s): %r", self._task_id, reason, text)
@@ -457,6 +502,8 @@ class OpenAIRealtimeSession:
         close_stream = getattr(self._state, "internal_state", None)
         if close_stream is not None and callable(getattr(close_stream, "close", None)):
             close_stream.close()
+        if self._speakers is not None:
+            self._speakers.close()
         if self._lease is not None:
             await self._lease.close()
         logger.info("[%s] Realtime session closed", self._task_id)
