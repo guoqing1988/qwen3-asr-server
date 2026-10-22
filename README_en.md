@@ -214,7 +214,10 @@ Current runtime behavior on the mainline codebase:
 - `qwen3-asr-1.7b` on macOS is only used when `QWEN3_ASR_MODEL=qwen3-asr-1.7b`
 - The default offline model is `qwen3-asr-confucius4-r2t2` (Confucius4-R2T2, CUDA vLLM path)
 - `word_timestamps=true` works on the current offline CUDA and CPU Rust paths
-- WebSocket streaming does not currently return word-level timestamps
+  - `ALIGNMENT_MODE=forced` (default) uses the forced aligner; `uniform` splits durations
+    evenly and skips the aligner (saves ~6 GB VRAM, `word_timestamp_method=uniform_fallback`)
+- WebSocket streaming does not currently return word-level timestamps; `/v1/realtime` adds a
+  speaker label to every `completed` event (`REALTIME_SPEAKER_LABELS`, on by default, ~1 s late)
 - Voiceprint embedding (CAM++) still follows `DEVICE`; its main CPU hotspot is speaker verification embedding. Speaker diarization itself is Nemotron-3 (GPU-recommended, ~397MB)
 
 ## API Endpoints
@@ -561,7 +564,7 @@ Automatic long audio segmentation:
 | `paraformer-large` | FunASR realtime | Chinese websocket realtime stack with realtime punctuation |
 
 **Runtime selection:**
-- **Default**: `qwen3-asr-confucius4-r2t2` (low VRAM: ~6.0GB for the ASR engine alone, ~8.7GB for the full stack with VAD/voiceprint/Paraformer/punctuation on a 24GB card)
+- **Default**: `qwen3-asr-confucius4-r2t2` (24GB card: ~2.8GB asleep, ~8.8GB with the ASR engine awake; ~4.1GB with the Q8 backend — see the VRAM table below)
 - **Tight VRAM / CPU-only / macOS**: Select the vendored Rust-backed `qwen3-asr-0.6b`
 - **Environment override**: Set `QWEN3_ASR_MODEL=qwen3-asr-confucius4-r2t2`, `qwen3-asr-1.7b` or `qwen3-asr-0.6b` to bypass automatic selection
 - **Local paths**: override with `QWEN3_ASR_MODEL_PATH` / `QWEN3_FORCED_ALIGNER_PATH` (`models.json` supports `${VAR:-default}` placeholders)
@@ -667,9 +670,14 @@ Settings in `.env.example`:
 | `NGINX_PORT` | `9101` | Host port exposed by Docker Compose |
 | `API_KEY` | - | API authentication key (optional, unauthenticated if not set) |
 | `CUDA_VISIBLE_DEVICES` | `0` | Visible GPU list; one backend instance is started per visible GPU |
+| `ASR_ENGINE` | `vllm` | `vllm` (bf16, default) or `llamacpp` (official Q8 GGUF, ~4 GB VRAM) |
 | `QWEN3_ASR_MODEL` | auto | Force `qwen3-asr-confucius4-r2t2`, `qwen3-asr-1.7b` or `qwen3-asr-0.6b` |
 | `QWEN3_ASR_MODEL_PATH` | `netease-youdao/Confucius4-R2T2` | ASR model path (local absolute path or HF repo id; referenced via `${VAR:-default}` in `models.json`) |
 | `QWEN3_FORCED_ALIGNER_PATH` | `Qwen/Qwen3-ForcedAligner-0.6B` | Word-level timestamp aligner path |
+| `NEMOTRON_MODEL_PATH` | `/data1/models/Nemotron-3-Diarization` | Speaker diarization model dir (frame-level, overlap-aware, up to 8 speakers) |
+| `ALIGNMENT_MODE` | `forced` | Word timing source: `forced` (acoustic alignment) or `uniform` (even split, saves VRAM) |
+| `REALTIME_SPEAKER_LABELS` | `true` | Attach realtime speaker labels to `/v1/realtime` (Nemotron streaming) |
+| `REALTIME_SPEAKER_LABEL_TIMEOUT` | `2.0` | Max seconds to wait for a label; `speaker` is `null` on timeout |
 | `HF_HUB_OFFLINE` | unset | Set to `1` only after preparing models for offline deployment |
 | `HF_ENDPOINT` | unset | Online Hugging Face mirror endpoint, for example `https://hf-mirror.com` |
 | `HF_HOME` | `~/.cache/huggingface` | HuggingFace cache directory (this project uses `/data1/models/huggingface`) |
@@ -724,7 +732,7 @@ brings normal startup VRAM down from 16GB to ~6GB.
 
 | Scenario | VRAM |
 |----------|------|
-| Baseline (idle) | 0.86GB |
+| Idle process (no requests) | ~1.9GB |
 | Sleeping (idle) | ~2.8GB (main process 1.9GB + engine residue 0.95GB) |
 | Awake: ASR engine only (Confucius4-R2T2) | ~8.8GB |
 | Awake: + forced aligner (word-level timestamps) | ~6.0GB more (peak total ~17GB) |

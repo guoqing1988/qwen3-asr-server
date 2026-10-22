@@ -17,7 +17,7 @@
 
 ## 主要特性
 
-- **混合运行时栈** - 离线推理由自动选择的 Qwen3-ASR 提供，WebSocket 流式由 Paraformer realtime 能力提供
+- **混合运行时栈** - 离线推理与 `/v1/realtime` 由 Qwen3-ASR（R2T2，vLLM / llama.cpp Q8）提供，阿里云 WebSocket 流式由 Paraformer realtime 能力提供
 - **多语言识别** - Qwen3-ASR 支持 52 种语言与方言，中英日韩等自动检测
 - **说话人分离** - 基于 Nemotron-3-Diarization（帧级 10ms、支持重叠、最多 8 人）自动识别多说话人，返回说话人标记
 - **实时说话人标签** - `/v1/realtime` 与 ASR 并行跑 Nemotron 流式分离，每段 `completed` 事件附带 `speaker`（约 1s 延迟）
@@ -26,9 +26,9 @@
 - **阿里云 API 兼容** - 支持阿里云语音识别 RESTful API 和 WebSocket 流式协议
 - **WebSocket 实时流式** - 边说边出字的实时语音识别，支持增量 partial 结果
 - **GPU 显存控制** - 可调 vLLM 显存利用率（`QWEN_GPU_MEMORY_UTILIZATION`）
-- **懒加载模型** - 空闲超时（默认 5 分钟）自动卸载模型释放显存，下次请求自动懒加载恢复
+- **两级空闲释放** - 空闲 15s 让引擎 `sleep`（权重回 CPU，唤醒仅 0.1~0.4s），持续空闲 10 分钟彻底释放 CUDA context
 - **智能远场过滤** - 流式 ASR 自动过滤远场声音和环境音，减少误触发
-- **智能音频分段** - 基于 VAD 的贪婪合并算法，自动切分长音频，避免包含过长静音
+- **智能音频分段** - Nemotron 说话人区间 + `AudioSplitter` 有界切分（覆盖整条时间轴、只在 <1s 短段合并）
 - **GPU 批处理加速** - 支持批量推理，比逐个处理快 2-3 倍
 - **资源感知运行时** - 根据当前机器资源自动选择合适的 Qwen3-ASR 模型
 
@@ -216,7 +216,10 @@ python start.py
 - 在 macOS 上，只有设置 `QWEN3_ASR_MODEL=qwen3-asr-1.7b` 时才会使用 `qwen3-asr-1.7b`
 - 默认离线模型为 `qwen3-asr-confucius4-r2t2`（Confucius4-R2T2，CUDA vLLM 路径）
 - `word_timestamps=true` 在当前离线 CUDA 与 CPU Rust 路径下可用
-- WebSocket 流式路径当前不返回词级时间戳
+  - 默认 `ALIGNMENT_MODE=forced`（forced aligner 声学对齐）；`uniform` 改为按字/词均分时长，
+    不加载 aligner（省约 6GB 显存，`verbose_json` 里 `word_timestamp_method=uniform_fallback`）
+- WebSocket 流式路径不返回词级时间戳；`/v1/realtime` 每段 `completed` 附带说话人标签
+  （`REALTIME_SPEAKER_LABELS`，默认开，标签比文本晚约 1s）
 - 说话人分离使用本地 Nemotron-3（帧级/重叠/8 人，推荐 GPU）；声纹 embedding（CAM++）仍跟随 `DEVICE`，CPU 上的主要热点是 speaker verification embedding
 
 ## API 接口
@@ -592,7 +595,7 @@ asyncio.run(main())
 | `paraformer-large` | FunASR realtime | 中文 WebSocket 实时识别栈，包含实时标点链路 |
 
 **运行时选择:**
-- **默认**：`qwen3-asr-confucius4-r2t2`（显存需求低：24GB 卡实测仅 ASR 引擎约 6.0GB，含 VAD/声纹/Paraformer/标点完整栈约 8.7GB）
+- **默认**：`qwen3-asr-confucius4-r2t2`（24GB 卡实测：休眠态约 2.8GB、唤醒态 ASR 引擎约 8.8GB；Q8 后端约 4.1GB，见下文「实测显存」）
 - **显存紧张 / 纯 CPU / macOS**: 选择基于 vendored Rust 的 `qwen3-asr-0.6b`
 - **环境变量覆盖**: 设置 `QWEN3_ASR_MODEL=qwen3-asr-confucius4-r2t2`、`qwen3-asr-1.7b` 或 `qwen3-asr-0.6b` 可跳过自动选择
 - 模型本地路径可用 `QWEN3_ASR_MODEL_PATH` / `QWEN3_FORCED_ALIGNER_PATH` 覆盖（`models.json` 支持 `${VAR:-default}` 占位符）
@@ -690,9 +693,14 @@ curl -X DELETE 'http://localhost:9101/api/v1/voiceprint-speakers/{speaker_id}'
 | `NGINX_PORT` | `9101` | Docker Compose 映射到宿主机的端口 |
 | `API_KEY` | - | API 认证密钥（可选，未配置时无需认证） |
 | `CUDA_VISIBLE_DEVICES` | `0` | GPU 设备列表，多卡用 `0,1,2,3` |
+| `ASR_ENGINE` | `vllm` | `vllm`（bf16，默认）或 `llamacpp`（官方 Q8 GGUF，显存约 4GB） |
 | `QWEN3_ASR_MODEL` | 自动选择 | 强制选择 `qwen3-asr-confucius4-r2t2`、`qwen3-asr-1.7b` 或 `qwen3-asr-0.6b` |
 | `QWEN3_ASR_MODEL_PATH` | `netease-youdao/Confucius4-R2T2` | ASR 主模型路径（本地绝对路径或 HF 仓库 id；`models.json` 用 `${VAR:-default}` 引用） |
 | `QWEN3_FORCED_ALIGNER_PATH` | `Qwen/Qwen3-ForcedAligner-0.6B` | 词级时间戳对齐器路径 |
+| `NEMOTRON_MODEL_PATH` | `/data1/models/Nemotron-3-Diarization` | 说话人分离模型目录（帧级、支持重叠、最多 8 人） |
+| `ALIGNMENT_MODE` | `forced` | 词级时间戳来源：`forced`（声学对齐）/ `uniform`（按字均分，省显存） |
+| `REALTIME_SPEAKER_LABELS` | `true` | `/v1/realtime` 是否附实时说话人标签（Nemotron 流式） |
+| `REALTIME_SPEAKER_LABEL_TIMEOUT` | `2.0` | 等待说话人标签的超时（秒），超时 `speaker` 为 `null` |
 | `HF_HUB_OFFLINE` | `0` | 离线部署且模型已准备好时设为 `1` |
 | `HF_ENDPOINT` | - | 在线镜像站；离线部署不要设置 |
 | `HF_HOME` | `~/.cache/huggingface` | HuggingFace 缓存目录（本项目设为 `/data1/models/huggingface`） |
@@ -749,10 +757,12 @@ QWEN_WARMUP_FORCED_ALIGNER=false        # aligner 懒加载
 
 | 场景 | 显存 |
 |------|------|
-| 基线（空载） | 0.86GB |
-| 仅 ASR 引擎（Confucius4-R2T2） | ~6.0GB |
-| 完整服务（+ VAD / CAM++ / Paraformer / 标点） | ~8.7GB |
-| 显式请求词级时间戳（+ aligner） | ~12GB（峰值） |
+| 空载进程（无请求） | ~1.9GB |
+| 休眠态（`sleep` 后，引擎残留 CUDA context） | ~2.8GB |
+| 唤醒态 ASR 引擎（vLLM bf16，长音频 encoder buffer 在内） | ~8.8GB |
+| + forced aligner（`word_timestamps=true`） | ~6.0GB（合计峰值约 17GB） |
+| llama.cpp Q8（`ASR_ENGINE=llamacpp`） | ~4.1GB |
+| 说话人分离（Nemotron-3） | ~0.4GB |
 
 **空闲休眠**：设置 `QWEN_IDLE_UNLOAD_TIMEOUT` 后，后台监控会在连续无请求超过该时长时让 vLLM 引擎 `sleep`——权重 offload 到 CPU、丢弃 KV cache，**子进程常驻**，下次请求自动 `wake_up`（实测 0.1~0.4 秒）。正在执行或等待引擎的请求不会被休眠，forced aligner 有独立的活跃计数与空闲计时（忙时不睡）。设置 `0` 可让模型常驻不休眠；本项目生产设 `15`（15 秒）。关闭 `QWEN_ENABLE_SLEEP_MODE` 则回退为旧行为（销毁 EngineCore 子进程，重新加载需 11~21 秒）。
 
