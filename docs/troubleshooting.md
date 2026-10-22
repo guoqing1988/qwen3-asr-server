@@ -109,6 +109,22 @@ Forced aligner produced reversed timestamps for token='，': start_ms=1120.0 end
 
 **排查命令**：`.venv/bin/python -m pytest tests/test_qwen3_align.py -v`（切分、单调化、align 解析链路全覆盖）
 
+## 2026-10-22：离线长音频「整段静音太多」导致结果为空
+
+**现象**：一条 39s 音频（前 10s 有语音、后 29s 几乎静音）走 `/v1/audio/transcriptions`
+返回 `{"text": "", "segments": []}`；同一文件走 `/v1/realtime` 能正常出字。
+
+**根因**：离线路径的切分来自 Nemotron 语音区间并**覆盖整条时间轴**（区间之间的间隙也送 ASR），
+39s 只切成 1 段；R2T2 对「少量语音 + 大量静音」的长段输出空文本，段落被丢弃。
+实时路径由 FireRedVAD 在静音处断句，所以不受影响。
+
+**规避**：
+- 先裁掉首尾/中间的大段静音（`ffmpeg -af silenceremove`）再转写；
+- 或用 `MAX_SEGMENT_SEC` 调小分段上限（不能解决单段内长静音）；
+- 纯字幕/实时场景优先用 `/v1/realtime`。
+
+**注意**：这与「分段有界不丢尾音」的修改无关——切分本身正确，是段内静音比例过高导致模型输出空。
+
 ## 2026-10-20：实时说话人标签与可配置对齐
 
 ### `/v1/realtime` 的 `completed.speaker` 一直是 null

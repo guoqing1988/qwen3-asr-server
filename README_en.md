@@ -300,12 +300,19 @@ print(transcript.text)
 curl -X POST "http://localhost:9101/v1/audio/transcriptions" \
   -H "Authorization: Bearer your_api_key" \
   -F "file=@audio.wav" \
-  -F "model=qwen3-asr-0.6b" \
+  -F "model=qwen3-asr-confucius4-r2t2" \
   -F "response_format=verbose_json" \
   -F "enable_speaker_diarization=true"
 ```
 
 **Supported Response Formats:** `json`, `text`, `srt`, `vtt`, `verbose_json`
+
+In `verbose_json`, each segment carries its speaker label in `speaker` (OpenAI style);
+top-level `words[]` holds word-level timings and `word_timestamp_method` records where
+they came from (`forced_alignment` / `uniform_fallback`).
+
+> Full parameters, response fields and copy-paste curl / Python / WebSocket examples for
+> every endpoint live in [docs/api-usage.md](docs/api-usage.md).
 
 ### Alibaba Cloud Compatible API
 
@@ -444,7 +451,7 @@ async def main():
             "type": "session.update",
             "session": {"audio": {"input": {
                 "format": {"type": "audio/pcm", "rate": 16000},
-                "transcription": {"model": "qwen3-asr", "prompt": "Bloomberg, Zhou Shumen"},
+                "transcription": {"model": "qwen3-asr-confucius4-r2t2", "prompt": "Bloomberg, Zhou Shumen"},
                 "turn_detection": {"type": "server_vad"},
             }}}
         }))
@@ -541,6 +548,11 @@ Automatic long audio segmentation:
 | `qwen3-asr-confucius4-r2t2` | Confucius4-R2T2 | **Default model**. NetEase Youdao realtime ASR (`default: true` in `models.json`); CUDA uses vLLM | Offline/Realtime |
 | `qwen3-asr-1.7b` | Qwen3-ASR 1.7B | High-performance multilingual ASR, 52 languages + dialects; CUDA uses vLLM | Offline/Realtime |
 | `qwen3-asr-0.6b` | Qwen3-ASR 0.6B | Lightweight multilingual ASR; CUDA uses vLLM, CPU/macOS uses Rust backend | Offline/Realtime |
+
+> **Only the bolded default row is online in this deployment**: this project currently ships
+> `qwen3-asr-confucius4-r2t2` only, so `GET /v1/models` returns just that id. `qwen3-asr-1.7b` /
+> `qwen3-asr-0.6b` need their own weights and `QWEN3_ASR_MODEL` to appear; the `model` field of a
+> transcription request does not select a model (see [docs/api-usage.md](docs/api-usage.md#9-模型-id-与别名)).
 
 ## Realtime-Only Capability
 

@@ -300,12 +300,18 @@ print(transcript.text)
 curl -X POST "http://localhost:9101/v1/audio/transcriptions" \
   -H "Authorization: Bearer your_api_key" \
   -F "file=@audio.wav" \
-  -F "model=qwen3-asr-0.6b" \
+  -F "model=qwen3-asr-confucius4-r2t2" \
   -F "response_format=verbose_json" \
   -F "enable_speaker_diarization=true"
 ```
 
 **支持的响应格式:** `json`, `text`, `srt`, `vtt`, `verbose_json`
+
+`verbose_json` 的分段里用 `speaker` 字段给说话人标签（OpenAI 风格），顶层 `words[]`
+为词级时间，`word_timestamp_method` 标明来源（`forced_alignment` / `uniform_fallback`）。
+
+> 每个端点的完整参数、响应字段与可复制的 curl / Python / WebSocket 示例见
+> [docs/api-usage.md](docs/api-usage.md)。
 
 ### 阿里云兼容接口
 
@@ -438,7 +444,7 @@ async def main():
             "type": "session.update",
             "session": {"audio": {"input": {
                 "format": {"type": "audio/pcm", "rate": 16000},
-                "transcription": {"model": "qwen3-asr", "prompt": "Bloomberg, 周树门"},
+                "transcription": {"model": "qwen3-asr-confucius4-r2t2", "prompt": "Bloomberg, 周树门"},
                 "turn_detection": {"type": "server_vad"},
             }}}
         }))
@@ -573,6 +579,11 @@ asyncio.run(main())
 | `qwen3-asr-confucius4-r2t2` | Confucius4-R2T2 | **默认模型**。网易有道实时 ASR（`models.json` 中 `default: true`）；CUDA 使用 vLLM | 离线/实时 |
 | `qwen3-asr-1.7b`   | Qwen3-ASR 1.7B    | 高性能多语言 ASR；CUDA 使用 vLLM | 离线/实时 |
 | `qwen3-asr-0.6b`   | Qwen3-ASR 0.6B    | 轻量版多语言 ASR；CUDA 使用 vLLM，CPU/macOS 使用 Rust backend | 离线/实时 |
+
+> **本机实际在线模型以上表加粗默认项为准**：本项目当前只部署 `qwen3-asr-confucius4-r2t2`，
+> 因此 `GET /v1/models` 只返回这一个 id。`qwen3-asr-1.7b` / `qwen3-asr-0.6b` 需要自行准备对应
+> 权重并用 `QWEN3_ASR_MODEL` 切换后才会出现在列表里；转写请求的 `model` 字段不参与选模型
+> （见 [docs/api-usage.md](docs/api-usage.md#9-模型-id-与别名)）。
 
 ## 仅实时能力
 

@@ -135,6 +135,11 @@ Qwen3-ASR 服务（GPU 版）：Confucius4-R2T2（vLLM bf16 默认，可选 llam
 - **句末标点补齐**（上游 `9b4ee87`/`1854214`/`ba1dba8` 简化版）：`app/services/asr/punctuation.py::restore_sentence_endings` 复用 FunASR CT-Transformer（`PUNC_MODEL`，CPU），离线结果缺句末标点时**只补一个标点**，不复制模型对正文的改写；英文/数字结尾用 ASCII 标点，结尾是逗号/分号则替换为句末标点，收尾引号保持在标点之后（`…"好的"` → `…"好的。"`）。批量一次调用（缺失段少于 1 条不加载模型），失败仅告警不阻断转写。开关 `ASR_RESTORE_SENTENCE_ENDING`（默认 true，全量列表长度不影响，实测 46 段 5min 音频 +0.2s）
 - 未搬运：上游「离线尾部 pad 二次解码」（`OFFLINE_TAIL_SAMPLES`，每段 2x 推理）——我们离线 `max_new_tokens=1024` 且分段 ≤60s，未见尾部截断，收益不确定不引入
 
+## 接口文档
+
+- `docs/api-usage.md`：各端点完整用法（参数表、响应字段、可复制 curl / Python / WebSocket 示例、
+  模型 ID 与别名、错误码）。API 变更后必须同步更新此文件。
+
 ## 约定
 
 - Python 3.12+ 现代类型注解（`X | None`、内置泛型、`collections.abc`），不写 `from __future__ import annotations`
