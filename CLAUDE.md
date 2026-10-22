@@ -83,7 +83,7 @@ Qwen3-ASR 服务（GPU 版）：Confucius4-R2T2（vLLM bf16 默认，可选 llam
 - **模型**：`app/utils/speaker_diarizer.py` 用 `AutoModelForAudioFrameClassification`（`Nemotron3DiarizationForAudioFrameClassification`）加载 `/data1/models/Nemotron-3-Diarization`，**帧级 10ms** 输出 8 路说话人概率，`diarize(path)` 返回 `DiarizationResult(segments, probabilities, frame_seconds, duration, speaker_ids)`，`speech_intervals_ms()` 给出合并重叠后的语音区间（说话人上限 8）；标签为「说话人N」，失败抛 `DefaultServerErrorException`
 - **取代 CAM++ 自动聚类**：旧 CAM++ diarization 在长音频（≥2048 embeddings）走 HDBSCAN 会欠分（实测 3 人音频只出 2 人）；Nemotron 实测同一 4524s 音频出 4 人、RTF≈0.014（62s/75min）、加载 18s（首次）、之后 6s/10min
 - **切分**：`AudioSplitter.merge_segments_greedy` 把说话人活动区间边界当切点，**覆盖整条时间轴**（区间之间的间隙也送 ASR——未检测到活动不等于静音），仅对 <1s 短段做邻段合并，超长段按 `MAX_SEGMENT_SEC` 切分；`split_audio_file(..., speech_segments=)` 直接吃 Nemotron 的区间（Nemotron 始终跑，`enable_speaker_diarization` 只控制是否输出标签）；段间静音 > `MAX_SILENCE_GAP_SEC`（默认 5s）或语音覆盖率 <50%（时长 >15s）时切段，避免整段被静音拖成空输出
-- **归属**：`app/services/asr/speaker_attribution.py`（`assign_speakers` + `consolidate_speaker_turns`）按词级时间把 ASR 块切到说话人（覆盖度 ≥0.5 才切换、模糊时沿用当前说话人），再把同人跨停顿合并成段落、≤2s 插话并入主说话人、段落过长在句末切分；词级时间戳偶有毫秒级越界会钳制到段内（不再整单失败）
+- **归属**：`app/services/asr/speaker_attribution.py`（`assign_speakers` + `consolidate_speaker_turns`）按词级时间把 ASR 块切到说话人（覆盖度 ≥0.5 才切换、模糊时沿用当前说话人），再把同人跨停顿（≤`MAX_TURN_GAP_SECONDS`=1s）合并成段落、≤2s 插话并入主说话人、段落过长在句末切分；词级时间戳偶有毫秒级越界会钳制到段内（不再整单失败）
 - 启用 diarization 时**自动跑 forced aligner**（`needs_words = word_timestamps or diarization`），返回给客户端前按请求恢复（未请求词级则清掉 `word_tokens`），对外结构不变
 - 声纹（CAM++）仍独立负责「说话人命名」：先 diarization 分段 → 按 speaker 分组提取 embedding → 命中已注册声纹则替换 `speaker_id`
 
@@ -131,6 +131,7 @@ Qwen3-ASR 服务（GPU 版）：Confucius4-R2T2（vLLM bf16 默认，可选 llam
 
 ## 离线分段与标点（2026-10-19 同步上游修正）
 
+- **两级时长上限（对外语义）**：① 送 ASR 的推理段**硬上限 `MAX_SEGMENT_SEC`**（默认 60s，`_split_by_fixed_duration` 强制切，恒不超）；② 响应 `segments[]` 是 `consolidate_speaker_turns` 合并后的**说话人段落**，`MAX_PARAGRAPH_SECONDS`=60s 为软上限、120s 为硬上限（`span > 120s` 无条件断，`span > 60s` 且上一段以 `。！？.!?` 结尾才断），实测最长约 180s。R2T2 常在段尾不给句末标点，所以「>60s 不断」很常见——客户看到 >60s 的段属正常，不是切分失效
 - **分段有界不丢尾音**（上游 `534405a`/`c02da1e`）：`AudioSplitter.merge_segments_greedy` 合并后再按 `MAX_SEGMENT_SEC` 切分；`_split_by_fixed_duration` 把不足最小时长的尾段并入前段（旧实现会直接丢弃），毫秒/采样点换算改整数；切分逻辑已全部收敛到 `AudioSplitter`（Nemotron 只提供语音区间，不再自己切段）
 - **句末标点补齐**（上游 `9b4ee87`/`1854214`/`ba1dba8` 简化版）：`app/services/asr/punctuation.py::restore_sentence_endings` 复用 FunASR CT-Transformer（`PUNC_MODEL`，CPU），离线结果缺句末标点时**只补一个标点**，不复制模型对正文的改写；英文/数字结尾用 ASCII 标点，结尾是逗号/分号则替换为句末标点，收尾引号保持在标点之后（`…"好的"` → `…"好的。"`）。批量一次调用（缺失段少于 1 条不加载模型），失败仅告警不阻断转写。开关 `ASR_RESTORE_SENTENCE_ENDING`（默认 true，全量列表长度不影响，实测 46 段 5min 音频 +0.2s）
 - 未搬运：上游「离线尾部 pad 二次解码」（`OFFLINE_TAIL_SAMPLES`，每段 2x 推理）——我们离线 `max_new_tokens=1024` 且分段 ≤60s，未见尾部截断，收益不确定不引入

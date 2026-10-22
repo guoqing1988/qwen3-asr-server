@@ -766,7 +766,10 @@ docker compose down && docker compose up -d
 - `ASR_RESTORE_SENTENCE_ENDING`（默认 `true`）：离线结果缺句末标点时，用 FunASR
   CT-Transformer（`PUNC_MODEL`，CPU）补一个标点。只补标点，不改写正文（标点模型会
   改空格/数字写法，这里只取最后一个标点）；缺失段 <1 条时不加载模型；模型异常仅告警。
-- 分段修复：`MAX_SEGMENT_SEC` 是硬上限，超长段会按低能量点/固定时长切分；末尾不足
+- 分段修复：`MAX_SEGMENT_SEC` 是**推理段**硬上限，超长段会按固定时长切分；末尾不足
   最小时长的残段并入前段，不再丢弃（丢尾音会导致最后一句识别缺失）。
+- 注意响应的 `segments[]` 不是推理段：`consolidate_speaker_turns` 会把同一说话人的连续
+  推理段合并成「说话人段落」，60s 为软上限、120s 为硬上限（最长约 180s），所以客户端
+  看到 >60s 的段是正常的（详见 README「分段时长上限」）。
 - 如需完全保留 R2T2 原始输出（不加任何标点），设
   `ASR_RESTORE_SENTENCE_ENDING=false` 后重启；无其他 API 结构变化。

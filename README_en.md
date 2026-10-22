@@ -422,6 +422,7 @@ Frame-level speaker diarization powered by **Nemotron-3-Diarization** (local `/d
 - **Automatic Detection** - No preset speaker count needed, model auto-detects (max 8 speakers)
 - **Frame-level / Overlap-aware** - 10 ms frames; long recordings are cut at speaker-activity boundaries into bounded segments (`MAX_SEGMENT_SEC`) before ASR
 - **Word-level Attribution** - Forced aligner runs automatically when diarization is on, so a single utterance that switches speakers is split at the word level, then merged into speaker paragraphs
+- **Two-layer duration limits** - inference segments are hard-capped at `MAX_SEGMENT_SEC` (60s); response `segments[]` are merged speaker paragraphs (60s soft / 120s hard cap, up to ~180s)
 - **Speaker Labels** - Response includes `speaker_id` field (e.g., "说话人1"); registered voiceprints replace it with the display name
 - **Subtitle Support** - SRT/VTT output includes speaker labels `[Speaker1] text content`
 
@@ -443,9 +444,24 @@ Automatic long audio segmentation:
 1. **Nemotron Speech Detection** - Frame-level (10 ms) speaker activity drives segmentation (always on)
 2. **Bounded Merge** - Split at activity boundaries while covering the whole timeline; only sub-1s fragments merge into neighbours, keeping every segment within `MAX_SEGMENT_SEC` (default 60s)
 3. **Bounded Split Without Dropping Tails** - Over-long segments are cut by fixed duration; a short tail is folded into the previous segment instead of being dropped
-   **Long-silence breaks** - gaps longer than `MAX_SILENCE_GAP_SEC` (default 5 s), or speech coverage under 50% for audio longer than 15 s, are split so a mostly-silent file no longer transcribes to empty text
-4. **Sentence-ending Restoration** - R2T2 usually omits punctuation when a segment is cut off mid-sentence; the offline result gets one final mark from the FunASR punctuation model (`ASR_RESTORE_SENTENCE_ENDING=true`; only the mark is added, the ASR text is never rewritten)
-5. **Batch Inference** - Multi-segment parallel processing, 2-3x performance improvement in GPU mode
+4. **Long-silence Breaks** - gaps longer than `MAX_SILENCE_GAP_SEC` (default 5 s), or speech coverage under 50% for audio longer than 15 s, are split so a mostly-silent file no longer transcribes to empty text
+5. **Sentence-ending Restoration** - R2T2 usually omits punctuation when a segment is cut off mid-sentence; the offline result gets one final mark from the FunASR punctuation model (`ASR_RESTORE_SENTENCE_ENDING=true`; only the mark is added, the ASR text is never rewritten)
+6. **Batch Inference** - Multi-segment parallel processing, 2-3x performance improvement in GPU mode
+
+### Segment Duration Limits (two layers)
+
+Segment duration in the response is not the same as the duration sent to the model:
+
+| Layer | Limit | Notes |
+|-------|-------|-------|
+| ① inference segment sent to ASR | **hard cap `MAX_SEGMENT_SEC`** (default 60s) | enforced by `AudioSplitter._split_by_fixed_duration`, never exceeded |
+| ② `segments[]` in the response (speaker paragraphs) | **60s soft cap / 120s hard cap**, up to ~180s | `consolidate_speaker_turns` merges consecutive inference segments of the same speaker |
+
+`segments[]` entries longer than 60s are expected: a paragraph breaks when the span exceeds 120s
+unconditionally, or when it exceeds 60s **and** the previous text ends with `。！？.!?`.
+R2T2 often omits sentence-ending punctuation where segments were cut, so a single speaker talking
+continuously with ≤1s pauses keeps merging, up to ~180s. Tune `MAX_PARAGRAPH_SECONDS` /
+`_paragraph_full()` in `app/services/asr/speaker_attribution.py` for a strict 60s break.
 
 ### WebSocket Streaming Limitations
 

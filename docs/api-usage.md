@@ -166,6 +166,17 @@ for seg in result.segments:
 
 `response_format=text` 直接返回纯文本（`Content-Type: text/plain`），`srt`/`vtt` 返回字幕文件内容。
 
+### 段时长说明（两层上限）
+
+| 层级 | 上限 | 说明 |
+|------|------|------|
+| 送 ASR 的推理段 | 硬上限 `MAX_SEGMENT_SEC`（默认 60s） | 切分强制生效，恒不超 |
+| 响应 `segments[]`（说话人段落） | 60s 软上限 / 120s 硬上限，实际最长约 180s | 同一说话人的连续推理段会合并成段落 |
+
+`segments[]` 中超过 60s 的段是正常现象：段落跨度 >120s 才无条件断开，跨度 >60s 时还要求上一段以
+`。！？.!?` 结尾才断；模型在段尾常不给句末标点，于是同一人连续讲话（停顿 ≤1s）会继续合并。
+`enable_speaker_diarization=false` 时不做这类合并，段时长更接近推理段（≤60s）。
+
 ## 4. 模型列表 `GET /v1/models`
 
 ```bash
