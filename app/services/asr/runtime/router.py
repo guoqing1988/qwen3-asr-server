@@ -28,7 +28,6 @@ _VLLM_SHARED_CONCURRENCY = 8
 class RuntimeFamily(str, Enum):
     QWEN_VLLM = "qwen_vllm"
     QWEN_RUST_CPU = "qwen_rust_cpu"
-    FUNASR = "funasr"
 
 
 @dataclass
@@ -112,14 +111,14 @@ class RuntimeRouter:
             if device == "cpu" and is_qwenasr_rust_available():
                 return RuntimeFamily.QWEN_RUST_CPU
             raise RuntimeError(f"Qwen3-ASR is not available on device '{device}'")
-        return RuntimeFamily.FUNASR
+        raise RuntimeError(f"不支持的引擎类型: {engine_type}（仅支持 qwen3）")
 
     def _pool_size_for_family(self, family: RuntimeFamily) -> int:
         if family == RuntimeFamily.QWEN_VLLM:
             return 1
         if family == RuntimeFamily.QWEN_RUST_CPU:
             return settings.QWEN_RUST_CPU_WORKERS
-        return settings.FUNASR_WORKERS
+        return 1
 
     def _create_pool(
         self, family: RuntimeFamily, model_id: str

@@ -20,7 +20,6 @@ from app.services.asr.qwen3_vllm import (
     _normalize_punct_by_context,
     _strip_cjk_spaces,
 )
-from app.services.qwen3_websocket_asr import ConnectionContext, Qwen3ASRService
 
 
 async def _run_inline(
@@ -139,81 +138,6 @@ class StreamVadDefaultsTest(unittest.TestCase):
         self.assertEqual(_normalize_punct_by_context("你好,world."), "你好，world.")
         self.assertEqual(_strip_cjk_spaces("你 好 世 界"), "你好世界")
         self.assertEqual(_strip_cjk_spaces("你 好 world"), "你好 world")
-
-
-class SegmentFinalizeTest(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self) -> None:
-        asyncio.get_running_loop().slow_callback_duration = 1.0
-
-    async def _finalize(self, *, final_pass: bool) -> tuple:
-        service = Qwen3ASRService()
-        engine = _FakeEngine()
-        vad = _FakeVAD()
-        ctx = ConnectionContext(
-            params={
-                "context": "某某公司",
-                "language": "Chinese",
-                "enable_inverse_text_normalization": True,
-            },
-            engine=engine,
-            streaming_state=_FakeStreamingState("段一文本"),
-            vad=vad,
-            segment_audio=np.zeros(16000, dtype=np.float32),
-        )
-        websocket = _FakeWebSocket()
-
-        from unittest.mock import patch
-
-        with (
-            patch(
-                "app.services.qwen3_websocket_asr.run_sync",
-                new=_run_inline,
-            ),
-            patch.object(settings, "QWEN_STREAM_FINAL_PASS", final_pass),
-        ):
-            await service._finalize_segment(websocket, ctx, "task", "silence")
-        return service, ctx, engine, vad, websocket
-
-    async def test_finalize_uses_two_pass_text(self) -> None:
-        _, ctx, engine, vad, websocket = await self._finalize(final_pass=True)
-        self.assertEqual(len(engine.transcribe_calls), 1)
-        self.assertEqual(ctx.confirmed_segments[0]["text"], "段一文本（离线校正）")
-        self.assertEqual(ctx.confirmed_segments[0]["reason"], "silence")
-        self.assertEqual(vad.reset_count, 1)
-        self.assertEqual(websocket.events[0]["type"], "segment_end")
-        self.assertEqual(
-            websocket.events[0]["result"]["segment_text"], "段一文本（离线校正）"
-        )
-        self.assertEqual(websocket.events[1]["type"], "segment_start")
-
-    async def test_finalize_keeps_streaming_text_without_final_pass(self) -> None:
-        _, ctx, engine, _, _ = await self._finalize(final_pass=False)
-        self.assertEqual(engine.transcribe_calls, [])
-        self.assertEqual(ctx.confirmed_segments[0]["text"], "段一文本")
-
-    async def test_finalize_does_not_clear_pending_audio(self) -> None:
-        """VAD 在 chunk 边界落定，buffer 中剩余音频属于下一段，不能清空。"""
-        service = Qwen3ASRService()
-        remaining = np.ones(800, dtype=np.float32)
-        ctx = ConnectionContext(
-            params={"language": "Chinese"},
-            engine=_FakeEngine(),
-            streaming_state=_FakeStreamingState("段一文本"),
-            segment_audio=np.zeros(16000, dtype=np.float32),
-            audio_buffer=remaining,
-        )
-        websocket = _FakeWebSocket()
-
-        from unittest.mock import patch
-
-        with (
-            patch("app.services.qwen3_websocket_asr.run_sync", new=_run_inline),
-            patch.object(settings, "QWEN_STREAM_FINAL_PASS", False),
-        ):
-            await service._finalize_segment(websocket, ctx, "task", "silence")
-
-        self.assertEqual(ctx.audio_buffer.tolist(), remaining.tolist())
-        self.assertEqual(ctx.segment_audio.size, 0)
 
 
 if __name__ == "__main__":

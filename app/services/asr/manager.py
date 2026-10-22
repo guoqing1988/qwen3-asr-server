@@ -206,13 +206,6 @@ def _register_builtin_engines():
     """注册内置的ASR引擎"""
     # 导入引擎模块并注册
     try:
-        from .engines import FunASREngine  # noqa: F401
-        from .engines.funasr import _register_funasr_engine
-        _register_funasr_engine(register_engine, DeclaredEntryConfig)
-    except ImportError as e:
-        logger.warning(f"FunASR引擎不可用: {e}")
-
-    try:
         from .qwen3_engine import Qwen3ASREngine  # noqa: F401
         from .qwen3_engine import _register_qwen3_engine
         _register_qwen3_engine(register_engine, DeclaredEntryConfig)

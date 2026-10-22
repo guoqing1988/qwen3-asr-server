@@ -54,12 +54,17 @@ class AudioSegment:
 class AudioSplitter:
     """音频分割器
 
-    使用 VAD 模型检测语音边界，智能分割长音频
+    以 Nemotron 说话人活动区间为切分依据（VAD 已随实时栈移除），
+    按有界策略切分长音频，并避免把超长静音并入语音段。
     """
 
     # 默认配置
     DEFAULT_MIN_SEGMENT_SEC = 1.0  # 每段最小时长（秒）
     DEFAULT_SAMPLE_RATE = 16000  # 默认采样率
+    # 语音覆盖率低于该值且时长超过 COVERAGE_CHECK_MIN_SEC 时也切分：
+    # 稀疏语音的整段（如 14s 语音 + 25s 静音）会被模型判成空输出
+    MIN_SPEECH_COVERAGE = 0.5
+    COVERAGE_CHECK_MIN_SEC = 15.0
 
     def __init__(
         self,
@@ -78,52 +83,51 @@ class AudioSplitter:
         self.min_segment_sec = min_segment_sec
         self.split_trigger_ms = int(split_trigger_sec * 1000)
         self.min_segment_ms = int(min_segment_sec * 1000)
+        self.max_silence_gap_ms = int(settings.MAX_SILENCE_GAP_SEC * 1000)
         self.device = device
 
-    def get_vad_segments(
-        self, audio_path: str
-    ) -> List[Tuple[int, int]]:
-        """使用 VAD 模型获取语音段
+    @staticmethod
+    def speech_coverage(
+        speech_segments: List[Tuple[int, int]],
+        total_duration_ms: int,
+    ) -> float:
+        """语音活动占总时长的比例（0~1）；区间重叠不重复计算。"""
+        if total_duration_ms <= 0 or not speech_segments:
+            return 0.0
+        covered = 0
+        cursor = 0
+        for start, end in sorted(
+            (max(0, int(s)), min(total_duration_ms, int(e))) for s, e in speech_segments
+        ):
+            start = max(start, cursor)
+            if end > start:
+                covered += end - start
+            cursor = max(cursor, end)
+        return min(1.0, covered / total_duration_ms)
 
-        Args:
-            audio_path: 音频文件路径
+    def find_long_gap(
+        self,
+        speech_segments: List[Tuple[int, int]],
+        total_duration_ms: int,
+    ) -> Tuple[int, int] | None:
+        """返回第一处超过阈值的静音间隙（毫秒），没有则返回 None。
 
-        Returns:
-            语音段列表，每个元素为 (start_ms, end_ms)
+        间隙包含首段之前与尾段之后：这两处同样可能把长静音并进语音段。
         """
-        try:
-            from ..services.asr.engines import get_global_vad_model
-
-            logger.info("开始 VAD 语音段检测...")
-            vad_model = get_global_vad_model(self.device)
-            if vad_model is None:
-                raise DefaultServerErrorException("VAD 模型未加载")
-
-            # 调用 VAD 模型
-            result = vad_model.generate(input=audio_path, cache={})
-
-            if not result or len(result) == 0:
-                logger.warning("VAD 未检测到语音段")
-                return []
-
-            # 解析 VAD 结果
-            # FunASR VAD 返回格式: [[start_ms, end_ms], [start_ms, end_ms], ...]
-            vad_segments = result[0].get("value", [])
-
-            if not vad_segments:
-                logger.warning("VAD 结果为空")
-                return []
-
-            logger.info(f"VAD 检测到 {len(vad_segments)} 个语音段")
-            logger.info(
-                "开始按 VAD 边界重分段 "
-                f"(split_trigger={self.split_trigger_sec}s, min_segment={self.min_segment_sec}s)..."
-            )
-            return [(int(seg[0]), int(seg[1])) for seg in vad_segments]
-
-        except Exception as e:
-            logger.error(f"VAD 检测失败: {e}")
-            raise DefaultServerErrorException(f"VAD 检测失败: {str(e)}")
+        if not speech_segments:
+            return None
+        spans = sorted(
+            (max(0, int(start)), min(total_duration_ms, int(end)))
+            for start, end in speech_segments
+        )
+        cursor = 0
+        for start, end in spans:
+            if start - cursor > self.max_silence_gap_ms:
+                return (cursor, start)
+            cursor = max(cursor, end)
+        if total_duration_ms - cursor > self.max_silence_gap_ms:
+            return (cursor, total_duration_ms)
+        return None
 
     def merge_segments_greedy(
         self, speech_segments: List[Tuple[int, int]], total_duration_ms: int
@@ -135,6 +139,7 @@ class AudioSplitter:
            因为未检测到说话人活动不等于静音（低音量语音常落在间隙里）
         2. 不把分离的语音区间打包进同一请求，段落拼接在识别之后进行
         3. 仅对短片段（< min_segment_ms）做邻段合并，超长片段按最大时长切分
+        4. 间隙本身已是独立片段：超过 MAX_SILENCE_GAP_SEC 的静音不会与语音段合并
 
         Args:
             speech_segments: 已检测到的语音段列表 [(start_ms, end_ms), ...]
@@ -223,15 +228,16 @@ class AudioSplitter:
         self,
         audio_path: str,
         output_dir: Optional[str] = None,
-        speech_segments: Optional[List[Tuple[int, int]]] = None,
+        *,
+        speech_segments: List[Tuple[int, int]],
     ) -> List[AudioSegment]:
         """分割音频文件
 
         Args:
             audio_path: 音频文件路径
             output_dir: 输出目录（可选，默认使用临时目录）
-            speech_segments: 外部语音区间（毫秒）；传入时跳过 VAD 检测
-                （Nemotron 的说话人活动区间只作切分提示）
+            speech_segments: Nemotron 说话人活动区间（毫秒，必填）；只作切分提示，
+                输出片段覆盖完整音频
 
         Returns:
             音频片段列表
@@ -243,9 +249,23 @@ class AudioSplitter:
 
             logger.info(f"音频总时长: {total_duration_ms / 1000:.2f}秒")
 
-            # 检查是否需要分割
-            if len(audio_data) * 1000 <= self.split_trigger_ms * int(sr):
-                logger.info("音频时长在限制内，无需分割")
+            speech_spans = list(speech_segments or [])
+
+            # 时长在限制内、且没有超长静音间隙时才整段返回；长静音必须切段，
+            # 否则整段会被静音拖成空输出（模型对「少量语音 + 大量静音」长段输出空）
+            long_gap = self.find_long_gap(speech_spans, total_duration_ms)
+            # 稀疏语音：时长不短但活动占比很小，整段送 ASR 会被判空（静音占主导）
+            sparse = (
+                total_duration_ms > self.COVERAGE_CHECK_MIN_SEC * 1000
+                and self.speech_coverage(speech_spans, total_duration_ms)
+                < self.MIN_SPEECH_COVERAGE
+            )
+            if (
+                len(audio_data) * 1000 <= self.split_trigger_ms * int(sr)
+                and long_gap is None
+                and not sparse
+            ):
+                logger.info("音频时长在限制内且无长静音，无需分割")
                 return [
                     AudioSegment(
                         start_ms=0,
@@ -254,17 +274,28 @@ class AudioSplitter:
                         temp_file=audio_path,
                     )
                 ]
+            if sparse and long_gap is None:
+                logger.info(
+                    "语音覆盖率 %.0f%% 偏低（阈值 %.0f%%），按语音区间切分",
+                    self.speech_coverage(speech_spans, total_duration_ms) * 100,
+                    self.MIN_SPEECH_COVERAGE * 100,
+                )
+            if long_gap is not None:
+                logger.info(
+                    "检测到长静音间隙 %d-%d ms（阈值 %.1fs），按语音区间切分",
+                    long_gap[0],
+                    long_gap[1],
+                    self.max_silence_gap_ms / 1000,
+                )
 
-            # 获取语音区间：优先使用外部（说话人活动）检测结果
-            if speech_segments is not None:
-                vad_segments = list(speech_segments)
-                logger.info(f"使用外部语音区间: {len(vad_segments)} 段")
-            else:
-                vad_segments = self.get_vad_segments(audio_path)
-
-            # 贪婪合并
-            merged_segments = self.merge_segments_greedy(vad_segments, total_duration_ms)
-            logger.info(f"重分段完成: 原始VAD={len(vad_segments)}, 输出={len(merged_segments)}")
+            merged_segments = (
+                self.merge_segments_greedy(speech_spans, total_duration_ms)
+                if speech_spans
+                else self._split_by_fixed_duration(total_duration_ms)
+            )
+            logger.info(
+                f"重分段完成: 原始语音区间={len(speech_spans)}, 输出={len(merged_segments)}"
+            )
 
             # 切分音频并保存到临时文件
             logger.info("开始切分音频并保存临时文件...")

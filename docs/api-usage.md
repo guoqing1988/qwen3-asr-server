@@ -12,12 +12,10 @@
 - [2. 鉴权](#2-鉴权)
 - [3. 离线转写 `POST /v1/audio/transcriptions`](#3-离线转写-post-v1audio-transcriptions)
 - [4. 模型列表 `GET /v1/models`](#4-模型列表-get-v1models)
-- [5. 阿里云兼容 `POST /stream/v1/asr`](#5-阿里云兼容-post-streamv1asr)
-- [6. 阿里云兼容 WebSocket `/ws/v1/asr`、`/ws/v1/asr/funasr`](#6-阿里云兼容-websocket-wsv1asrws-v1asrfunasr)
-- [7. OpenAI Realtime `WS /v1/realtime`](#7-openai-realtime-ws-v1realtime)
-- [8. 声纹注册 `/api/v1/voiceprint-speakers`](#8-声纹注册-apiv1voiceprint-speakers)
-- [9. 模型 ID 与别名](#9-模型-id-与别名)
-- [10. 错误码](#10-错误码)
+- [5. OpenAI Realtime `WS /v1/realtime`](#5-openai-realtime-ws-v1realtime)
+- [6. 声纹注册 `/api/v1/voiceprint-speakers`](#6-声纹注册-apiv1voiceprint-speakers)
+- [7. 模型 ID 与别名](#7-模型-id-与别名)
+- [8. 错误码](#8-错误码)
 
 ## 1. 端点总览
 
@@ -25,12 +23,6 @@
 |------|------|------|-----------|-------------|
 | `/v1/audio/transcriptions` | POST | OpenAI Audio API 兼容，文件/URL 转写 | ✅ 分段 | ✅ 可选 |
 | `/v1/models` | GET | 列出当前在线离线模型 | — | — |
-| `/stream/v1/asr` | POST | 阿里云一句话/录音文件识别兼容 | ✅ 分段 | ✅ 可选 |
-| `/stream/v1/asr/models` | GET | 阿里云模型列表（声明条目） | — | — |
-| `/stream/v1/asr/health` | GET | 健康检查 | — | — |
-| `/ws/v1/asr` | WS | 阿里云实时语音识别协议（Paraformer） | ❌ | ❌ |
-| `/ws/v1/asr/funasr` | WS | 同上（向后兼容别名） | ❌ | ❌ |
-| `/ws/v1/asr/qwen` | WS | **已废弃**：返回 `endpoint_deprecated` 并 `close(1008)` | — | — |
 | `/v1/realtime` | WS | OpenAI Realtime transcription 子集（R2T2） | ✅ 整段标签 | ❌ |
 | `/api/v1/voiceprint-speakers` | GET/POST/DELETE | 声纹注册、列表、删除 | — | — |
 
@@ -38,7 +30,6 @@
 
 - **离线录音 / 会议纪要** → `/v1/audio/transcriptions`（说话人分离 + 词级时间戳齐全）
 - **已有 OpenAI 客户端** → 同一端点，改 `base_url` 即可
-- **已有阿里云 SDK** → `/stream/v1/asr`（REST）或 `/ws/v1/asr`（实时）
 - **实时字幕 / 语音助手** → `/v1/realtime`（带实时说话人标签）
 - **需要给说话人起名字** → 先声纹注册，再走离线转写
 
@@ -49,10 +40,10 @@
 ```bash
 # 1) Bearer（推荐）
 -H "Authorization: Bearer $API_KEY"
-# 2) 阿里云风格
--H "X-NLS-Token: $API_KEY"
-# 3) 查询参数（浏览器 WebSocket）
+# 2) 查询参数（浏览器 WebSocket）
 ?token=$API_KEY
+# 3) 兼容旧客户端的 X-NLS-Token 请求头
+-H "X-NLS-Token: $API_KEY"
 ```
 
 WebSocket 还支持 OpenAI 不安全子协议：`openai-insecure-api-key.<API_KEY>`（握手回 `subprotocol=realtime`）。
@@ -170,7 +161,7 @@ for seg in result.segments:
 | `word_timestamp_method` | `forced_alignment`（声学对齐，默认）或 `uniform_fallback`（按字均分，`ALIGNMENT_MODE=uniform`） |
 | `text` | 全文；开启分离时为多段拼接文本 |
 
-> 注意区分：`/v1/audio/transcriptions` 用 OpenAI 风格的 `speaker`；`/stream/v1/asr` 用阿里云风格的
+> 注意：`/v1/audio/transcriptions` 用 OpenAI 风格的 `speaker`；
 > `speaker_id`，且开启 `word_timestamps` 时词级时间放在 `segments[].word_tokens`。
 
 `response_format=text` 直接返回纯文本（`Content-Type: text/plain`），`srt`/`vtt` 返回字幕文件内容。
@@ -185,115 +176,7 @@ curl -s http://127.0.0.1:18109/v1/models -H "Authorization: Bearer $API_KEY"
 {"object": "list", "data": [{"id": "qwen3-asr-confucius4-r2t2", "object": "model", "created": 1792635247, "owned_by": "qwen3-asr"}]}
 ```
 
-## 5. 阿里云兼容 `POST /stream/v1/asr`
-
-请求体为**音频二进制**（`Content-Type: application/octet-stream`），参数走 query。
-
-| 参数 | 类型 | 默认 | 说明 |
-|------|------|------|------|
-| `audio_address` | string | — | 音频/视频 URL；请求体非空时忽略 |
-| `sample_rate` | int | `16000` | 8000 / 16000 / 22050 / 24000 |
-| `enable_speaker_diarization` | bool | `true` | 说话人分离 |
-| `word_timestamps` | bool | `false` | 词级时间戳 |
-| `vocabulary_id` | string | — | 无权重热词（逗号分隔，≤512）；数字权重语法已废弃、会忽略 |
-
-```bash
-# 上传文件
-curl -X POST "http://127.0.0.1:18109/stream/v1/asr?enable_speaker_diarization=true" \
-  -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/octet-stream" \
-  --data-binary @meeting.wav
-
-# 转 URL
-curl -X POST "http://127.0.0.1:18109/stream/v1/asr?audio_address=https://example.com/a.mp3" \
-  -H "Authorization: Bearer $API_KEY"
-```
-
-响应（成功）：
-
-```json
-{
-  "task_id": "e57592050b44ec2915b32e9349d059aa",
-  "result": "有几个事情呢，你你那个板给我拿过来，有几个。",
-  "status": 200,
-  "message": "SUCCESS",
-  "segments": [
-    {"text": "有几个事情呢，你你那个板给我拿过来，有几个。",
-     "start_time": 3.92, "end_time": 8.32, "speaker_id": "说话人1"}
-  ],
-  "duration": 10.0,
-  "processing_time": 0.895
-}
-```
-
-开启 `word_timestamps=true` 时每个 segment 额外带 `word_tokens`
-（`[{"text": "有", "start_time": 0.0, "end_time": 0.16}, ...]`，相对该段起点）。
-
-辅助端点：
-
-```bash
-curl -s http://127.0.0.1:18109/stream/v1/asr/health -H "Authorization: Bearer $API_KEY"
-curl -s http://127.0.0.1:18109/stream/v1/asr/models -H "Authorization: Bearer $API_KEY"
-```
-
-## 6. 阿里云兼容 WebSocket `/ws/v1/asr`、`/ws/v1/asr/funasr`
-
-协议（FunASR / 阿里云实时识别）：JSON 控制帧 + 二进制 PCM 帧。
-
-- 握手 header：`appkey`（= API_KEY）、`namespace`（`SpeechTranscriber`）、`task_id`
-- 发送 `StartTranscription` → 连续发送 16k/16bit/单声道 **PCM 二进制帧**（建议 200ms/帧）→ 发送 `StopTranscription`
-- 接收事件（`header.name`）：`TranscriptionResultChanged`（partial）、`SentenceEnd`（定稿句）、`TranscriptionCompleted`（全部完成）、`TaskFailed`
-
-```python
-import asyncio, json
-import numpy as np
-import soundfile as sf
-import websockets
-
-KEY, TASK = "<API_KEY>", "task-1"
-
-async def main():
-    audio, sr = sf.read("speech.wav", dtype="float32")
-    assert sr == 16000, "服务端要求 16kHz PCM"
-    pcm = (np.clip(audio, -1, 1) * 32768).astype("<i2").tobytes()
-    hdr = {"appkey": KEY, "namespace": "SpeechTranscriber", "task_id": TASK}
-
-    async with websockets.connect(
-        f"ws://127.0.0.1:18109/ws/v1/asr/funasr?token={KEY}"
-    ) as ws:
-        async def reader():
-            async for raw in ws:
-                data = json.loads(raw)
-                name = data.get("header", {}).get("name", "")
-                text = data.get("payload", {}).get("result", "")
-                if text:
-                    print(name, text)
-
-        task = asyncio.create_task(reader())
-        await ws.send(json.dumps({
-            "header": {**hdr, "name": "StartTranscription", "message_id": "start"},
-            "payload": {"format": "pcm", "sample_rate": 16000,
-                        "enable_intermediate_result": True},
-        }))
-        for off in range(0, len(pcm), 3200):
-            await ws.send(pcm[off:off + 3200])
-            await asyncio.sleep(0.05)
-        await asyncio.sleep(2)
-        await ws.send(json.dumps({
-            "header": {**hdr, "name": "StopTranscription", "message_id": "stop"},
-            "payload": {},
-        }))
-        await asyncio.sleep(5)
-        task.cancel()
-
-asyncio.run(main())
-```
-
-> `/ws/v1/asr/qwen` 已废弃：连接后返回
-> `{"type":"error","error":{"code":"endpoint_deprecated"}}` 并 `close(1008)`。
-> 实时转写请用下面的 `/v1/realtime`。
-
-## 7. OpenAI Realtime `WS /v1/realtime`
+## 5. OpenAI Realtime `WS /v1/realtime`
 
 `ws://<host>:18109/v1/realtime?intent=transcription&token=<API_KEY>`
 
@@ -373,7 +256,7 @@ asyncio.run(main())
 > **发送速率**：建议按 1x 实时速率发送。一次性猛灌后立即停发时，末段说话人标签会用
 > `flush` 把尾部音频按最后一块推理一次（精度略降），最大等待 `REALTIME_SPEAKER_LABEL_TIMEOUT`。
 
-## 8. 声纹注册 `/api/v1/voiceprint-speakers`
+## 6. 声纹注册 `/api/v1/voiceprint-speakers`
 
 注册后，离线转写中匹配到的说话人 `speaker_id` 会被替换为注册显示名（如 `张三`）。
 
@@ -398,11 +281,11 @@ curl -X DELETE "http://127.0.0.1:18109/api/v1/voiceprint-speakers/<speaker_id>" 
 
 匹配不确定时保留 `说话人N` 原标签；声纹库为 sqlite-vec 本地存储。
 
-## 9. 模型 ID 与别名
+## 7. 模型 ID 与别名
 
 `/v1/models` 当前返回 `qwen3-asr-confucius4-r2t2`（Confucius4-R2T2，vLLM bf16 或 llama.cpp Q8，由 `ASR_ENGINE` 决定）。
 
-- **`/v1/audio/transcriptions`、`/stream/v1/asr`**：`model` 字段不参与路由，始终使用当前激活模型（传任意值都能跑，建议传 `/v1/models` 的 id）
+- **`/v1/audio/transcriptions`**：`model` 字段不参与路由，始终使用当前激活模型（传任意值都能跑，建议传 `/v1/models` 的 id）
 - **`/v1/realtime`**：`transcription.model` 仅回显；服务端固定用当前激活的 Qwen3-ASR
 - **`QWEN3_ASR_MODEL`**：切换/指定模型的唯一开关
 
@@ -414,7 +297,7 @@ curl -X DELETE "http://127.0.0.1:18109/api/v1/voiceprint-speakers/<speaker_id>" 
 | `qwen3-asr-confucius4-r2t2`、`confucius4-r2t2`、`confucius4`、`r2t2`、`netease-youdao/confucius4-r2t2` | `qwen3-asr-confucius4-r2t2` |
 | `qwen3-asr-0.6b`、`0.6b`、`0.6`、`qwen/qwen3-asr-0.6b` | `qwen3-asr-0.6b`（需该模型已部署） |
 
-## 10. 错误码
+## 8. 错误码
 
 统一 JSON：
 

@@ -21,7 +21,7 @@ Qwen3-ASR 服务（GPU 版）：Confucius4-R2T2（vLLM bf16 默认，可选 llam
   - ASR 主模型：`/data1/models/Confucius4-R2T2`（`QWEN3_ASR_MODEL_PATH`）
   - 词级时间戳对齐器：`/data1/models/Qwen3-ForcedAligner-0.6B`（`QWEN3_FORCED_ALIGNER_PATH`）
   - 说话人分离：`/data1/models/Nemotron-3-Diarization`（`NEMOTRON_MODEL_PATH`，帧级/Nemotron-3，397MB）
-  - VAD / 声纹 CAM++ / Paraformer / 标点：`/data1/models/modelscope/hub/models/{iic,damo}`
+  - 声纹 CAM++ / 标点：`/data1/models/modelscope/hub/models/{iic,damo}`
 - **启动流程**：`start.py` 加载 `.env` → 检查模型缺失则报错（离线模式不自动下载）→ main.py lifespan 预加载引擎 → 就绪
 - **配置**：`.env` 文件，`start.py` 通过 `load_dotenv()` 加载
 - **GPU 选择**：由 `.env` 的 `CUDA_VISIBLE_DEVICES` 决定（unit 里**不设** `CUDA_VISIBLE_DEVICES` / `DEVICE` 的 `Environment=`，否则 systemd 的 `Environment` 优先级更高，会架空 `.env`）
@@ -76,13 +76,13 @@ Qwen3-ASR 服务（GPU 版）：Confucius4-R2T2（vLLM bf16 默认，可选 llam
 - **实时说话人标签**（`REALTIME_SPEAKER_LABELS`，默认开）：`app/services/asr/realtime_speakers.py::SpeakerStream` 用 Nemotron 流式（10ms 帧、`speaker_cache` 跨块复用）与 ASR 并行消费同一路 PCM；每段 `completed` 事件带 `speaker`（`说话人N` / `null`），标签比文本晚约 1s（Nemotron 右上下文）。音频持续流入时无需等待；客户端 commit 不再发音频时用 `flush` 把尾部音频按最后一块推理一次（精度略降），随后该流终结并在下一段重建（说话人编号 `names` 继承）。等待上限 `REALTIME_SPEAKER_LABEL_TIMEOUT`（2s），分离失败只让标签为 null，绝不影响转写
 - 鉴权：`Authorization: Bearer`、`?token=`、子协议 `openai-insecure-api-key.<key>`；握手回 `subprotocol=realtime`
 - 流式 partial **关闭 ITN**（保证 delta 单调，避免 `一`→`1` 改写前缀），`.completed` 才做 ITN/标点；`server_vad` 模式句尾静音自动落定，连续讲话按 `QWEN_STREAM_SEGMENT_MAX_SEC`（60s）兜底
-- **`ws /ws/v1/asr/qwen` 已废弃**：连接后返回 `{"type":"error","error":{"code":"endpoint_deprecated"}}` 并 `close(1008)`；`/ws/v1/asr`、`/ws/v1/asr/funasr`（FunASR 阿里云协议）保持不变
+- **对外只有 OpenAI 兼容接口**（对齐上游 `AsrServe`）：`/v1/audio/transcriptions`、`/v1/models`、`/ws /v1/realtime`、`/api/v1/voiceprint-speakers*`；阿里云协议端点（`/stream/v1/asr*`、`/ws/v1/asr*`）与 Paraformer 实时栈已于 2026-10-22 移除
 
 ## 说话人分离与说话人归属（Nemotron-3）
 
 - **模型**：`app/utils/speaker_diarizer.py` 用 `AutoModelForAudioFrameClassification`（`Nemotron3DiarizationForAudioFrameClassification`）加载 `/data1/models/Nemotron-3-Diarization`，**帧级 10ms** 输出 8 路说话人概率，`diarize(path)` 返回 `DiarizationResult(segments, probabilities, frame_seconds, duration, speaker_ids)`，`speech_intervals_ms()` 给出合并重叠后的语音区间（说话人上限 8）；标签为「说话人N」，失败抛 `DefaultServerErrorException`
 - **取代 CAM++ 自动聚类**：旧 CAM++ diarization 在长音频（≥2048 embeddings）走 HDBSCAN 会欠分（实测 3 人音频只出 2 人）；Nemotron 实测同一 4524s 音频出 4 人、RTF≈0.014（62s/75min）、加载 18s（首次）、之后 6s/10min
-- **切分**：`AudioSplitter.merge_segments_greedy` 把说话人活动区间边界当切点，**覆盖整条时间轴**（区间之间的间隙也送 ASR——未检测到活动不等于静音），仅对 <1s 短段做邻段合并，超长段按 `MAX_SEGMENT_SEC` 切分；`split_audio_file(..., speech_segments=)` 直接吃 Nemotron 的区间，未开分离时回退 FunASR VAD
+- **切分**：`AudioSplitter.merge_segments_greedy` 把说话人活动区间边界当切点，**覆盖整条时间轴**（区间之间的间隙也送 ASR——未检测到活动不等于静音），仅对 <1s 短段做邻段合并，超长段按 `MAX_SEGMENT_SEC` 切分；`split_audio_file(..., speech_segments=)` 直接吃 Nemotron 的区间（Nemotron 始终跑，`enable_speaker_diarization` 只控制是否输出标签）；段间静音 > `MAX_SILENCE_GAP_SEC`（默认 5s）或语音覆盖率 <50%（时长 >15s）时切段，避免整段被静音拖成空输出
 - **归属**：`app/services/asr/speaker_attribution.py`（`assign_speakers` + `consolidate_speaker_turns`）按词级时间把 ASR 块切到说话人（覆盖度 ≥0.5 才切换、模糊时沿用当前说话人），再把同人跨停顿合并成段落、≤2s 插话并入主说话人、段落过长在句末切分；词级时间戳偶有毫秒级越界会钳制到段内（不再整单失败）
 - 启用 diarization 时**自动跑 forced aligner**（`needs_words = word_timestamps or diarization`），返回给客户端前按请求恢复（未请求词级则清掉 `word_tokens`），对外结构不变
 - 声纹（CAM++）仍独立负责「说话人命名」：先 diarization 分段 → 按 speaker 分组提取 embedding → 命中已注册声纹则替换 `speaker_id`

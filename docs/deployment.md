@@ -18,7 +18,7 @@
 **前置要求：**
 - NVIDIA GPU（需要 CUDA 13.0 驱动，≥580；cu130 wheel）
 - 已安装 NVIDIA Container Toolkit
-- 显存 8GB+（默认模型 Confucius4-R2T2；24GB 卡实测：仅 ASR 引擎约 6GB，含 VAD/声纹/Paraformer/标点完整栈约 8.7GB，启用词级时间戳峰值约 12GB）
+- 显存 8GB+（默认模型 Confucius4-R2T2；24GB 卡实测：仅 ASR 引擎约 6~8.8GB，含 Nemotron 分离/声纹/标点完整栈约 8.7GB，启用词级时间戳峰值约 17GB）
 
 ```bash
 # 使用 docker run（带模型挂载）
@@ -218,8 +218,8 @@ sudo journalctl -u qwen3-asr -f
 # 重启服务（代码 bind mount 已生效时）
 sudo systemctl restart qwen3-asr
 
-# 健康检查
-curl -s http://127.0.0.1:9101/stream/v1/asr/health \
+# 健康检查（模型列表可正常返回即就绪）
+curl -s http://127.0.0.1:9101/v1/models \
   -H "Authorization: Bearer $API_KEY"
 
 # 服务不断重启时重置计数
@@ -254,16 +254,8 @@ python start.py
 ### 验证部署
 
 ```bash
-# 健康检查
-curl http://localhost:9101/stream/v1/asr/health
-
-# 查看可用模型
-curl http://localhost:9101/stream/v1/asr/models
-
-# 测试语音识别（阿里云协议）
-curl -X POST "http://localhost:9101/stream/v1/asr" \
-  -H "Content-Type: application/octet-stream" \
-  --data-binary @test.wav
+# 健康检查 / 查看可用模型
+curl http://localhost:9101/v1/models
 
 # 测试 OpenAI 兼容接口
 curl -X POST "http://localhost:9101/v1/audio/transcriptions" \
@@ -277,7 +269,7 @@ curl -X POST "http://localhost:9101/v1/audio/transcriptions" \
 vLLM 引擎初始化在特定宿主环境（如 CPU 电压不稳、驱动兼容问题）下可能偶发段错误（SIGSEGV）。服务内置两层容错：
 
 1. **懒加载自动重试**：引擎被空闲卸载后，请求触发懒加载时创建失败会自动重试 3 次（间隔 5s/10s 递增），提高恢复概率。
-2. **预加载失败降级启动**：启动时 qwen3 引擎预加载失败不再拒绝启动（降级继续，funasr 等其余引擎照常服务），失败引擎在后续请求时由懒加载路径自动重试恢复。
+2. **预加载失败降级启动**：启动时 qwen3 引擎预加载失败不再拒绝启动（降级继续，其余能力照常服务），失败引擎在后续请求时由懒加载路径自动重试恢复。
 
 ### 显存策略
 
@@ -287,8 +279,8 @@ vLLM 引擎初始化在特定宿主环境（如 CPU 电压不稳、驱动兼容�
 |------|------|
 | 基线（空载） | 0.86GB |
 | 仅 ASR 引擎 | ~6.0GB |
-| 完整服务（+ VAD / CAM++ / Paraformer / 标点） | ~8.7GB |
-| 显式请求词级时间戳（+ aligner） | ~12GB（峰值） |
+| 完整服务（+ Nemotron 分离 / CAM++ / 标点） | ~8.7GB |
+| 显式请求词级时间戳（+ aligner） | ~17GB（峰值） |
 
 压缩手段（全部走 `.env`，不写死在 `models.json`）：
 
@@ -538,10 +530,8 @@ uv run python -m app.utils.download_models --export-dir ./models
 ├── huggingface/                # HuggingFace 缓存（HF_HOME）
 └── modelscope/
     └── hub/models/             # MODELSCOPE_CACHE=/data1/models/modelscope/hub
-        ├── iic/speech_paraformer-large_...          # 中文实时流式 ~849MB
-        ├── iic/punc_ct-transformer_...（×2）        # 离线/实时标点
-        ├── damo/speech_campplus_sv_...              # 声纹验证（声纹匹配）
-        └── damo/speech_fsmn_vad_...                 # VAD ~69MB
+        ├── iic/punc_ct-transformer_zh-cn-...        # 离线句末标点 ~300MB
+        └── damo/speech_campplus_sv_...              # 声纹验证（声纹匹配）
 ```
 
 > 完整模型用途与使用场景见 README「模型清单」章节。换模型或换路径只改 `.env`
@@ -587,7 +577,7 @@ context..." 指令；强制语言时在生成提示后追加 `language X<asr_tex
 40s 英文音频 + 热词 `GPT, transcription`：旧写法输出全部 `gbt`（热词无效），
 官方写法输出 `gpt`（热词生效）。
 
-**合并规则**：离线（`/v1/audio/transcriptions` 的 `prompt`、`/stream/v1/asr` 的
+**合并规则**：离线（`/v1/audio/transcriptions` 的 `prompt`、
 `vocabulary_id`）与流式（`/v1/realtime` 的 `transcription.prompt` / `keywords`）都按
 `merge_hotwords(ASR_DEFAULT_HOTWORDS, 请求热词)` 合并：默认词在前、去重、保留短语内空格。
 
@@ -610,7 +600,8 @@ context..." 指令；强制语言时在生成提示后追加 `language X<asr_tex
 ### 健康检查
 
 ```bash
-curl http://localhost:9101/stream/v1/asr/health
+# /v1/models 能正常返回即表示服务已就绪
+curl http://localhost:9101/v1/models -H "Authorization: Bearer $API_KEY"
 ```
 
 ### 日志监控

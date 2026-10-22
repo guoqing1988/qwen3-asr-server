@@ -3,7 +3,7 @@
 <h1>Qwen3-ASR</h1>
 <h3>Ready-to-use Local Speech Recognition API Service</h3>
 
-Speech recognition API service centered on [Qwen3-ASR](https://github.com/QwenLM/Qwen3-ASR), with CUDA vLLM and CPU Rust backends, OpenAI API compatibility, Alibaba Cloud Speech API compatibility, and a Paraformer realtime websocket capability.
+Speech recognition API service centered on [Qwen3-ASR](https://github.com/QwenLM/Qwen3-ASR), with CUDA vLLM and CPU Rust backends and OpenAI API compatibility (offline transcription + Realtime streaming).
 
 [简体中文](./README.md)
 
@@ -17,18 +17,17 @@ Speech recognition API service centered on [Qwen3-ASR](https://github.com/QwenLM
 
 ## Features
 
-- **Hybrid Runtime Stack** - Uses auto-selected Qwen3-ASR for offline inference and Paraformer realtime for websocket streaming
+- **Hybrid Runtime Stack** - Qwen3-ASR (R2T2, vLLM / llama.cpp Q8) serves both offline inference and `/v1/realtime`
 - **Multilingual Recognition** - Qwen3-ASR supports 52 languages and dialects with automatic detection (zh/en/ja/ko/...)
 - **Speaker Diarization** - Frame-level (10 ms) multi-speaker identification with Nemotron-3-Diarization (overlap-aware, up to 8 speakers)
 - **Realtime speaker labels** - `/v1/realtime` runs Nemotron streaming beside ASR and adds `speaker` to every `completed` event (~1 s behind the text)
 - **Voiceprint Registration & Naming** - Register voiceprint samples per speaker; matched `speaker_id` values are replaced with display names
 - **OpenAI API Compatible** - Supports `/v1/audio/transcriptions` endpoint, works with OpenAI SDK
-- **Alibaba Cloud API Compatible** - Supports Alibaba Cloud Speech RESTful API and WebSocket streaming protocol
 - **WebSocket Real-time Streaming** - True streaming recognition with incremental partial results
 - **GPU Memory Control** - Configurable vLLM memory utilization (`QWEN_GPU_MEMORY_UTILIZATION`)
 - **Lazy Model Loading** - Auto-unloads models after idle timeout (default 5 min) to release VRAM; next request triggers automatic lazy reload
 - **Smart Far-Field Filtering** - Automatically filters far-field sounds and ambient noise in streaming ASR
-- **Intelligent Audio Segmentation** - VAD-based greedy merge algorithm for automatic long audio splitting
+- **Intelligent Audio Segmentation** - Nemotron speech activity as split points, bounded merge, and long-silence breaks
 - **GPU Batch Processing** - Batch inference support, 2-3x faster than sequential processing
 - **Resource-Aware Runtime** - Auto-selects the appropriate Qwen3-ASR model for the current machine
 
@@ -227,35 +226,32 @@ Current runtime behavior on the mainline codebase:
 When `API_KEY` is configured in `.env`, every API endpoint requires the key.
 Different endpoint groups accept different headers:
 
-| Endpoint group | `X-NLS-Token` | `Authorization: Bearer` |
-|----------------|:---:|:---:|
-| `/api/v1/voiceprint-*` (voiceprint management) | ✅ | ✅ |
-| `/stream/*` (Alibaba Cloud compatible REST) | ✅ | ✅ |
-| `/v1/*` (OpenAI compatible) | ✅ | ✅ |
-| `/ws/v1/asr/*` (WebSocket) | header or query param `token` / `x_nls_token` | ❌ |
+| Endpoint group | Authentication |
+|----------------|----------------|
+| `/v1/*`, `/api/v1/voiceprint-*` (HTTP) | `Authorization: Bearer <API_KEY>` (`X-NLS-Token` still accepted for compatibility) |
+| `/v1/realtime` (WebSocket) | header / `?token=` / subprotocol `openai-insecure-api-key.*` |
 
 Notes:
-- All HTTP endpoint groups accept both `X-NLS-Token` and
-  `Authorization: Bearer` (`X-NLS-Token` takes precedence).
+- HTTP endpoints use `Authorization: Bearer`; `X-NLS-Token` is kept only for
+  backward compatibility.
 - WebSocket connections cannot send custom headers from browsers, so tokens
-  are accepted via query parameters (`token` / `x_nls_token`).
+  are accepted via the query parameter (`token`).
 - `/docs` (Swagger), `/redoc` and `/` (root info) are public and need no auth.
 - When `API_KEY` is empty, authentication is skipped for all endpoints.
 
-### HTTP Transcription Endpoints Compared
+### HTTP Transcription Endpoint
 
-Both offline transcription endpoints are **synchronous** (submit the full
-audio, wait, and get the complete result in one response). Both use
-qwen3-asr-confucius4-r2t2 and support speaker diarization, voiceprint naming and
-word-level timestamps. True streaming lives on the WebSocket endpoints below:
+Offline transcription is **synchronous** (submit the whole file, get one response) and uses the
+active offline model (`qwen3-asr-confucius4-r2t2`) with speaker diarization, voiceprint naming and
+word-level timestamps. Streaming lives on the WebSocket endpoint below.
 
-| Aspect | `/stream/v1/asr` (Alibaba Cloud compatible) | `/v1/audio/transcriptions` (OpenAI compatible) |
-|--------|---------------------------------------------|-------------------------------------------------|
-| Input | Raw audio body (octet-stream) or `audio_address` URL; no multipart upload | `file` upload or `audio_address` URL |
-| Hotwords | ✅ `vocabulary_id` | ✅ `prompt` (merged with preset) |
-| Language | Auto-detected | ✅ `language` parameter |
-| Response | Fixed Alibaba Cloud JSON (`task_id`/`status`/`result`/`processing_time`) | `json` / `text` / `srt` / `vtt` / `verbose_json` |
-| Best for | Migrating Alibaba NLS clients (hotwords, same protocol) | OpenAI ecosystem (SDK, subtitle output) |
+| Aspect | `/v1/audio/transcriptions` (OpenAI compatible) |
+|--------|-----------------------------------------------|
+| Input | `file` upload or `audio_address` URL |
+| Hotwords | ✅ `prompt` (merged with the preset hotwords) |
+| Language | ✅ `language` |
+| Response | `json` / `text` / `srt` / `vtt` / `verbose_json` |
+| Best for | OpenAI ecosystem (SDK, subtitles) |
 
 ### OpenAI Compatible API
 
@@ -317,84 +313,17 @@ they came from (`forced_alignment` / `uniform_fallback`).
 > Full parameters, response fields and copy-paste curl / Python / WebSocket examples for
 > every endpoint live in [docs/api-usage.md](docs/api-usage.md).
 
-### Alibaba Cloud Compatible API
-
-| Endpoint | Method | Function |
-|----------|--------|----------|
-| `/stream/v1/asr` | POST | Speech recognition (long audio support) |
-| `/stream/v1/asr/models` | GET | Declared model/capability entries |
-| `/stream/v1/asr/health` | GET | Health check |
-| `/ws/v1/asr` | WebSocket | Streaming ASR (Alibaba Cloud protocol compatible) |
-| `/ws/v1/asr/funasr` | WebSocket | FunASR streaming (backward compatible) |
-| `/ws/v1/asr/qwen` | WebSocket | **Deprecated** (returns `endpoint_deprecated`) |
-| `/v1/realtime` | WebSocket | Standard OpenAI Realtime transcription (`intent=transcription`) |
-
-**Request Parameters:**
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `audio_address` | string | `https://media.cdn.vect.one/podcast_demo.mp4` (docs example) | Audio/video URL (optional; ignored when body content is uploaded) |
-| `sample_rate` | int | `16000` | Sample rate |
-| `enable_speaker_diarization` | bool | `true` | Enable speaker diarization |
-| `word_timestamps` | bool | `false` | Word-level timestamps. Uses the forced aligner by default (`ALIGNMENT_MODE=forced`); `ALIGNMENT_MODE=uniform` splits segment duration evenly as a low-memory fallback. |
-| `vocabulary_id` | string | - | Hotword context (comma-separated, for example: `word1,word2,Bank of China`), merged with the `ASR_DEFAULT_HOTWORDS` preset; falls back to the preset when omitted. **Deprecated:** numeric weights are unsupported and ignored. |
-
-**Usage Examples:**
-
-```bash
-# Basic usage
-curl -X POST "http://localhost:9101/stream/v1/asr" \
-  -H "Content-Type: application/octet-stream" \
-  --data-binary @audio.wav
-
-# With parameters
-curl -X POST "http://localhost:9101/stream/v1/asr?enable_speaker_diarization=true" \
-  -H "Content-Type: application/octet-stream" \
-  --data-binary @audio.wav
-```
-
-**Response Example:**
-
-```json
-{
-  "task_id": "xxx",
-  "status": 200,
-  "message": "SUCCESS",
-  "result": "Speaker1 content...\nSpeaker2 content...",
-  "duration": 60.5,
-  "processing_time": 1.234,
-  "segments": [
-    {
-      "text": "Today is a nice day.",
-      "start_time": 0.0,
-      "end_time": 2.5,
-      "speaker_id": "Speaker1",
-      "word_tokens": [
-        {"text": "Today", "start_time": 0.0, "end_time": 0.5},
-        {"text": "is", "start_time": 0.5, "end_time": 0.7},
-        {"text": "a nice day", "start_time": 0.7, "end_time": 1.5}
-      ]
-    }
-  ]
-}
-```
-
 ### WebSocket Streaming API
-
-Two kinds of WebSocket endpoints are available:
 
 | Endpoint | Backend | Notes |
 |----------|---------|-------|
-| `/v1/realtime` | Qwen3-ASR (R2T2, vLLM / llama.cpp Q8) | **Recommended**: standard OpenAI Realtime transcription protocol, multilingual |
-| `/ws/v1/asr` | FunASR realtime (Paraformer) | Alibaba Cloud protocol compatible, Chinese streaming with realtime punctuation |
-| `/ws/v1/asr/funasr` | FunASR realtime | Backward-compatible alias of the above |
-| `/ws/v1/asr/qwen` | — | **Deprecated**: replies `endpoint_deprecated` then closes (code 1008); use `/v1/realtime` |
+| `/v1/realtime` | Qwen3-ASR (R2T2, vLLM / llama.cpp Q8) | Standard OpenAI Realtime transcription protocol (`intent=transcription`), multilingual + realtime speaker labels |
 
-These endpoints are **real-time speech transcription** — audio is sent
+This endpoint is **real-time speech transcription** — audio is sent
 incrementally and partial results stream back while speaking. This is the
 fundamental difference from the offline HTTP endpoints:
 
-| | WebSocket (real-time) | HTTP offline (`/v1/*`, `/stream/v1/asr`) |
+| | WebSocket (real-time) | HTTP offline (`/v1/*`) |
 |---|---|---|
 | Interaction | Long-lived connection, send audio while receiving results | Submit the full audio once, wait synchronously |
 | Results | Partial increments → `segment_end` confirmation | Full result (segments + timestamps) |
@@ -408,8 +337,7 @@ captions, then re-send the full recording to the offline endpoint for
 diarized/voiceprint-named segments.
 
 Authentication: WebSocket connections cannot send custom headers from
-browsers, so pass the API key as a query parameter (`?token=YOUR_KEY` or
-`x_nls_token`). Skipped when `API_KEY` is not configured.
+browsers, so pass the API key as a query parameter (`?token=YOUR_KEY`).
 
 **OpenAI Realtime transcription protocol** (`/v1/realtime`) — a standard
 OpenAI Realtime WebSocket subset (`intent=transcription`); recognition reuses
@@ -480,14 +408,11 @@ asyncio.run(main())
 ```
 
 **Streaming limitations**:
-- Both paths do **not** return word-level timestamps.
-- The FunASR path keeps at most ~10 seconds of pending audio and applies
-  backpressure instead of dropping audio.
-- **Neither path supports speaker diarization or voiceprint naming.** Voiceprint
-  matching requires complete per-speaker segments, so it only runs on the
-  offline endpoints. Workaround: transcribe live with WebSocket, then re-send
-  the full recording to `/v1/audio/transcriptions` (or `/stream/v1/asr`) to get
-  diarized segments with registered voiceprint names.
+- No word-level timestamps.
+- Realtime returns a whole-utterance `speaker` label but no offline-style
+  segment structure or voiceprint naming. For diarized segments with registered
+  voiceprint names, re-send the full recording to `/v1/audio/transcriptions`
+  (two-request pattern).
 
 ## Speaker Diarization
 
@@ -503,12 +428,11 @@ Frame-level speaker diarization powered by **Nemotron-3-Diarization** (local `/d
 Disable speaker diarization:
 
 ```bash
-# OpenAI API
 -F "enable_speaker_diarization=false"
-
-# Alibaba Cloud API
-?enable_speaker_diarization=false
 ```
+
+> Speaker detection always runs (it drives segmentation); this flag only controls
+> whether `speaker` labels appear in the response.
 
 ## Audio Processing
 
@@ -516,21 +440,14 @@ Disable speaker diarization:
 
 Automatic long audio segmentation:
 
-1. **VAD Voice Detection** - Detect voice boundaries, filter silence
-2. **Greedy Merge** - Merge short segments into neighbours, keeping every segment within `MAX_SEGMENT_SEC` (default 60s)
-3. **Bounded Split Without Dropping Tails** - Over-long segments are cut at low-energy points or by fixed duration; a short tail is folded into the previous segment instead of being dropped
+1. **Nemotron Speech Detection** - Frame-level (10 ms) speaker activity drives segmentation (always on)
+2. **Bounded Merge** - Split at activity boundaries while covering the whole timeline; only sub-1s fragments merge into neighbours, keeping every segment within `MAX_SEGMENT_SEC` (default 60s)
+3. **Bounded Split Without Dropping Tails** - Over-long segments are cut by fixed duration; a short tail is folded into the previous segment instead of being dropped
+   **Long-silence breaks** - gaps longer than `MAX_SILENCE_GAP_SEC` (default 5 s), or speech coverage under 50% for audio longer than 15 s, are split so a mostly-silent file no longer transcribes to empty text
 4. **Sentence-ending Restoration** - R2T2 usually omits punctuation when a segment is cut off mid-sentence; the offline result gets one final mark from the FunASR punctuation model (`ASR_RESTORE_SENTENCE_ENDING=true`; only the mark is added, the ASR text is never rewritten)
 5. **Batch Inference** - Multi-segment parallel processing, 2-3x performance improvement in GPU mode
 
 ### WebSocket Streaming Limitations
-
-**FunASR Model Limitations** (using `/ws/v1/asr` or `/ws/v1/asr/funasr`):
-- ✅ Real-time speech recognition, low latency
-- ✅ Sentence-level timestamps
-- ❌ **Word-level timestamps** (not implemented on the FunASR realtime path)
-- ❌ **Confidence scores** (not implemented)
-- Audio ingress is bounded to 10 seconds and applies WebSocket backpressure instead of dropping audio. Send incrementally and continue reading recognition events.
-- This path uses Paraformer, while offline endpoints use Qwen3-ASR. Compare latency within the same path, not their total throughput.
 
 **Qwen3-ASR Streaming** (using `/v1/realtime`, standard OpenAI Realtime protocol):
 - ✅ Multi-language real-time recognition
@@ -557,18 +474,13 @@ Automatic long audio segmentation:
 > `qwen3-asr-0.6b` need their own weights and `QWEN3_ASR_MODEL` to appear; the `model` field of a
 > transcription request does not select a model (see [docs/api-usage.md](docs/api-usage.md#9-模型-id-与别名)).
 
-## Realtime-Only Capability
-
-| Capability ID | Runtime | Description |
-|---------------|---------|-------------|
-| `paraformer-large` | FunASR realtime | Chinese websocket realtime stack with realtime punctuation |
+## Runtime Selection
 
 **Runtime selection:**
 - **Default**: `qwen3-asr-confucius4-r2t2` (24GB card: ~2.8GB asleep, ~8.8GB with the ASR engine awake; ~4.1GB with the Q8 backend — see the VRAM table below)
 - **Tight VRAM / CPU-only / macOS**: Select the vendored Rust-backed `qwen3-asr-0.6b`
 - **Environment override**: Set `QWEN3_ASR_MODEL=qwen3-asr-confucius4-r2t2`, `qwen3-asr-1.7b` or `qwen3-asr-0.6b` to bypass automatic selection
 - **Local paths**: override with `QWEN3_ASR_MODEL_PATH` / `QWEN3_FORCED_ALIGNER_PATH` (`models.json` supports `${VAR:-default}` placeholders)
-- `paraformer-large` realtime capability is always prepared for websocket streaming
 
 At startup the service checks the current runtime model plan and downloads missing models by default. Set `HF_HUB_OFFLINE=1` only for strictly offline deployments with a prepared cache.
 
@@ -582,17 +494,14 @@ split across two channels:
 |-------|------|----------------|---------|
 | Confucius4-R2T2 | ~3.9GB | Local: `/data1/models/Confucius4-R2T2` | **Default** offline transcription, `/v1/realtime` streaming |
 | Qwen3-ForcedAligner 0.6B | ~1.8GB | Local: `/data1/models/Qwen3-ForcedAligner-0.6B` | Word-level timestamps (`word_timestamps=true`, offline, lazy-loaded) |
-| Paraformer Large | ~849MB | MS: `/data1/models/modelscope/hub/models/iic/speech_paraformer-large_...` | `/ws/v1/asr` + `/ws/v1/asr/funasr` (Chinese realtime streaming) |
-| Punctuation (offline) | ~300MB | MS: `/data1/models/modelscope/hub/models/iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch` | Punctuation for offline/streaming ASR |
-| Punctuation (realtime) | ~300MB | MS: `/data1/models/modelscope/hub/models/iic/punc_ct-transformer_..._vad_realtime-...` | Realtime punctuation in the FunASR websocket path |
+| Punctuation (offline) | ~300MB | MS: `/data1/models/modelscope/hub/models/iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch` | Sentence-ending restoration (`ASR_RESTORE_SENTENCE_ENDING`) |
 | Nemotron-3-Diarization | ~397MB | Local: `/data1/models/Nemotron-3-Diarization` | Speaker diarization (offline, frame-level/overlap/8 speakers) |
 | CAM++ speaker verification | ~90MB | MS: `/data1/models/modelscope/hub/models/damo/speech_campplus_sv_zh-cn_16k-common` | Voiceprint registration / naming |
-| VAD (FSMN) | ~69MB | MS: `/data1/models/modelscope/hub/models/damo/speech_fsmn_vad_zh-cn-16k-common-pytorch` | Voice activity detection for audio splitting |
 
 **Scenario guidance**:
 
-- **Chinese realtime streaming** (low latency, realtime punctuation): FunASR
-  path uses Paraformer Large + realtime punctuation (ModelScope).
+- **Realtime streaming** (low latency, realtime speaker labels): `/v1/realtime`
+  with Confucius4-R2T2.
 - **Multilingual / offline / word timestamps**: Confucius4-R2T2 + ForcedAligner.
 - **Speaker diarization** (offline only): Nemotron-3-Diarization (local model, requires the pinned `transformers` commit with `Nemotron3DiarizationForAudioFrameClassification`).
 - **Voiceprint naming** (offline only): CAM++ (ModelScope).
@@ -606,15 +515,11 @@ split across two channels:
 | Endpoint | Model |
 |----------|-------|
 | `POST /v1/audio/transcriptions` | qwen3-asr-confucius4-r2t2 |
-| `POST /stream/v1/asr` | qwen3-asr-confucius4-r2t2 |
-| `GET /v1/models`, `health`, `/stream/v1/asr/models` | read-only, no inference |
+| `GET /v1/models` | read-only, no inference |
 | `/v1/realtime` | qwen3-asr-confucius4-r2t2 |
-| `/ws/v1/asr`, `/ws/v1/asr/funasr` | paraformer-large (Chinese realtime) |
-| `/ws/v1/asr/qwen` | Deprecated, returns `endpoint_deprecated` |
 
-All HTTP transcription endpoints share the default offline model
-(`qwen3-asr-confucius4-r2t2`; override with `QWEN3_ASR_MODEL=qwen3-asr-0.6b`).
-Paraformer serves only the two FunASR-compatible WebSocket endpoints.
+All endpoints share the active offline model
+(`qwen3-asr-confucius4-r2t2`; switch with `QWEN3_ASR_MODEL`).
 
 ## Voiceprint Database
 

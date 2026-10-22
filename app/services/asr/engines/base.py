@@ -146,25 +146,22 @@ class BaseASREngine(ABC):
             logger.info(f"{task_prefix}[transcribe_long_audio] 音频时长: {duration:.2f}秒")
 
             # 统一使用分段处理
-            diarization = None
-            vad_segments = None
+            # 说话人检测始终运行（语音区间是切分依据），flag 只决定是否输出标签；
+            # 与上游一致：VAD 已移除，Nemotron 的区间同时承担语音检测。
+            from app.utils.speaker_diarizer import get_speaker_diarizer
 
-            if enable_speaker_diarization:
-                # 多说话人：Nemotron 帧级分离，语音区间只作切分提示
-                from app.utils.speaker_diarizer import get_speaker_diarizer
+            logger.info(f"{task_prefix}运行 Nemotron 说话人检测用于分段")
+            activity = get_speaker_diarizer().diarize(audio_path)
+            speech_segments = activity.speech_intervals_ms()
+            diarization = activity if enable_speaker_diarization else None
+            if not activity.segments:
+                logger.warning(
+                    f"{task_prefix}Nemotron 未检测到说话人活动，按固定时长切分整段音频"
+                )
 
-                logger.info(f"{task_prefix}使用 Nemotron 说话人分离模式")
-                diarization = get_speaker_diarizer().diarize(audio_path)
-                vad_segments = diarization.speech_intervals_ms()
-                if not diarization.segments:
-                    logger.warning(
-                        f"{task_prefix}Nemotron 未检测到说话人活动，保留整段音频交给 ASR"
-                    )
-
-            # 转写始终按有界分段；未开说话人分离时用 VAD 检测语音区间
             splitter = AudioSplitter(device=self.device)
             audio_segments = splitter.split_audio_file(
-                audio_path, speech_segments=vad_segments
+                audio_path, speech_segments=speech_segments
             )
 
             # 选择要处理的片段

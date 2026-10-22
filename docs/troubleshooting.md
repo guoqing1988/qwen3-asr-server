@@ -284,7 +284,7 @@ sudo systemctl daemon-reload
 
 ### 流式（实时转录）输出乱码 / 退化成标点
 
-**现象**：Qwen3 流式（原 `/ws/v1/asr/qwen`，现 `/v1/realtime`）返回的文本是 `"language None"`、`"None"`、`"."`，而不是实际转写内容；同一音频的离线转写完全正常。
+**现象**：Qwen3 流式（`/v1/realtime`）返回的文本是 `"language None"`、`"None"`、`"."`，而不是实际转写内容；同一音频的离线转写完全正常。
 
 **三个根因（2026-09-25 逐一定位）**：
 
@@ -468,7 +468,7 @@ load=11.0s → before-sleep infer ok → sleep=3.7s（释放 6.45GiB）→ wake=
 11. **第二次 `word_timestamps` 请求卡死不返回**：aligner 空闲 15s 会被 `sleep_aligner` 休眠归还显存；休眠状态下 `encode` 会挂起（实测 >300s 无响应）。`_get_aligner()` 与 `align_transcript()` 现在都会在 encode 前检测 `_aligner_sleeping` 并 `wake_up()`，实测唤醒后第二次请求 21s、第三次 0.7s 正常。
 12. **partial 文本前缀看似"回撤"（`不是三` → `不是33`、`退休的七` → `退休的70`）**：这是 ITN 数字规范化在文本增长后改写了已发布前缀（既有行为，vLLM 路径相同），不是识别回撤；如需绝对单调应按 `current_segment_text` 的定稿结果展示或关闭数字规范化。
 13. **非法音频返回 400 而非 500**：`normalize_audio_for_asr` / `convert_audio_to_wav` 失败属客户端输入问题，已改为 `InvalidParameterException`（HTTP 400），OpenAI 兼容接口同时新增 `APIException` → 状态码映射。
-14. **`/ws/v1/asr/qwen` 连接后立刻收到 `endpoint_deprecated` 并被关闭（1008）**：该自定义协议端点已废弃，改用标准 `ws /v1/realtime?intent=transcription`（OpenAI Realtime transcription 子集）；事件映射见 README「OpenAI Realtime 转录协议」。
+14. **旧客户端连 `/ws/v1/asr*`、`/stream/v1/asr*` 得到 404**：阿里云协议栈与 Paraformer 实时栈已于 2026-10-22 移除（对齐上游 `AsrServe`），改用 `/v1/audio/transcriptions`（离线）与 `ws /v1/realtime?intent=transcription`（实时）。
 15. **新 `/v1/realtime` 握手返回 403**：鉴权失败。优先用 `Authorization: Bearer <API_KEY>` 或 `?token=<API_KEY>`；浏览器可用子协议 `openai-insecure-api-key.<API_KEY>`。未配置 `API_KEY` 时免鉴权。
 16. **`delta` 拼接后与 `.completed` 文本略有差异**：预期行为。delta 走流式 append-only 且**关闭 ITN**（保证增量单调），`.completed` 才对定稿文本做 ITN/标点，并在 `QWEN_STREAM_FINAL_PASS=true` 时用离线路径重转（专名更准）。
 17. **`server_vad` 模式下长时间没有 `.completed`**：连续讲话无静音时不会落定，达到 `QWEN_STREAM_SEGMENT_MAX_SEC`（默认 60s）会强制落定；若仍不落定，检查音频是否有有效语音（段内有效语音 <0.8s 不落定）以及 FireRedVAD 模型是否加载成功。
@@ -481,3 +481,4 @@ load=11.0s → before-sleep infer ok → sleep=3.7s（释放 6.45GiB）→ wake=
 24. **长音频说话人数被切得过碎（3 小时音频出现 8 个说话人）**：Nemotron 上限 8 人，长会议里出现的配音/插话会被单独计为说话人；这是模型上限而非 bug。若只需段落级区分，可把 `enable_speaker_diarization=false` 后按需合并。
 25. **vLLM 0.30 下 `/v1/realtime` 出现英文碎片或丢字**（Q8 正常）：0.30 起流式每轮都要重新生成 `language X<asr_text>` 头部，短 chunk（<1s）音频模型容易输出幻觉词；已在 `_stream_max_new_tokens` 预留 12 token 并改用「已解析正文 + 显式头部」构造 prefix，但仍不如 Q8 稳定。**实时场景请用 `ASR_ENGINE=llamacpp`**，vLLM 后端以离线转写为主。
 26. **切生产 venv 后启动失败/回滚**：升级前 `cp -a .venv /data1/venvs/qwen3-asr-backup-$(date +%F)`；回滚把 `/data1/www/qwen3-asr-server/.venv` 重新指向备份（或恢复原目录）后 `sudo systemctl restart qwen3-asr`。注意 `uv.lock` 与已安装 C 扩展必须成套，不要对运行中的环境执行 `uv sync --frozen` 降级。
+27. **短音频里大半是静音时整段转写为空（如 39s 音频 14s 语音 + 25s 静音）**：旧实现只按时长判断（≤`MAX_SEGMENT_SEC` 就整段送 ASR），模型在静音占主导的段上直接输出空文本。现在 `AudioSplitter` 加了两条切分触发条件——段间静音 > `MAX_SILENCE_GAP_SEC`（默认 5s），或语音覆盖率 < 50% 且时长 > 15s——会按 Nemotron 语音区间切成多段，语音不再被静音拖成空结果。切分覆盖完整时间轴，边界间隙照旧送 ASR。

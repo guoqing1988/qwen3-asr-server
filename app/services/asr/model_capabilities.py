@@ -67,18 +67,16 @@ def _build_huggingface_asset(
     )
 
 
-_VAD_ASSETS = (
-    ModelAsset(
-        source="modelscope",
-        model_id=settings.VAD_MODEL,
-        description="VAD",
-        revision="v2.0.2",
-        required_patterns=("configuration.json", "config.yaml", "model.pb"),
-        min_total_size_bytes=1_000_000,
-    ),
+# 离线标点用的 CT-Transformer（FunASR AutoModel，CPU）
+_OFFLINE_PUNC_ASSET = ModelAsset(
+    source="modelscope",
+    model_id=settings.PUNC_MODEL,
+    description="Punctuation Offline",
+    required_patterns=("configuration.json", "config.yaml", "model.pt", "tokens.json"),
+    min_total_size_bytes=50_000_000,
 )
 
-# 说话人分离已改用本地 Nemotron-3（见 get_enabled_qwen_huggingface_assets），
+# 说话人分离用本地 Nemotron-3（见 get_enabled_qwen_huggingface_assets），
 # 这里只保留声纹命名需要的 CAM++ SV 模型。
 _DIARIZATION_ASSETS = (
     ModelAsset(
@@ -90,60 +88,21 @@ _DIARIZATION_ASSETS = (
     ),
 )
 
-_REALTIME_PARAFORMER_ASSETS = (
-    ModelAsset(
-        source="modelscope",
-        model_id="iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online",
-        description="Paraformer Large Realtime",
-        required_patterns=(
-            "configuration.json",
-            "config.yaml",
-            "model.pt",
-            "tokens.json",
-            "seg_dict",
-        ),
-        min_total_size_bytes=100_000_000,
-    ),
-    ModelAsset(
-        source="modelscope",
-        model_id=settings.PUNC_MODEL,
-        description="Punctuation Offline",
-        required_patterns=("configuration.json", "config.yaml", "model.pt", "tokens.json"),
-        min_total_size_bytes=50_000_000,
-    ),
-)
-
-_REALTIME_PUNC_ASSET = ModelAsset(
-    source="modelscope",
-    model_id=settings.PUNC_REALTIME_MODEL,
-    description="Punctuation Realtime",
-    required_patterns=("configuration.json", "config.yaml", "model.pt", "tokens.json"),
-    min_total_size_bytes=50_000_000,
-)
-
 
 def get_download_modelscope_assets() -> list[ModelAsset]:
     """Return the full static ModelScope export set used by predownload/export."""
-    return [
-        *_VAD_ASSETS,
-        *_DIARIZATION_ASSETS,
-        *_REALTIME_PARAFORMER_ASSETS,
-        _REALTIME_PUNC_ASSET,
-    ]
+    return [*_DIARIZATION_ASSETS, _OFFLINE_PUNC_ASSET]
 
 
 def get_runtime_required_modelscope_assets(
     *,
-    include_realtime_punc: bool,
+    include_realtime_punc: bool = False,
 ) -> list[ModelAsset]:
-    """Return ModelScope assets required by the current runtime plan."""
-    assets = [*_VAD_ASSETS, *_DIARIZATION_ASSETS]
-    runtime_models = get_runtime_model_ids()
-    if "paraformer-large" in runtime_models:
-        assets.extend(_REALTIME_PARAFORMER_ASSETS)
-        if include_realtime_punc:
-            assets.append(_REALTIME_PUNC_ASSET)
-    return assets
+    """Return ModelScope assets required by the current runtime plan.
+
+    `include_realtime_punc` 仅为兼容旧调用方保留：实时标点随 Paraformer 实时栈一并移除。
+    """
+    return [*_DIARIZATION_ASSETS, _OFFLINE_PUNC_ASSET]
 
 
 def get_enabled_qwen_huggingface_assets(

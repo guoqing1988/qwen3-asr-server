@@ -3,7 +3,7 @@
 <h1>Qwen3-ASR</h1>
 <h3>开箱即用的本地私有化部署语音识别服务</h3>
 
-以 [Qwen3-ASR](https://github.com/QwenLM/Qwen3-ASR) 为核心的语音识别 API 服务，提供 CUDA vLLM（默认）、CUDA llama.cpp Q8（低显存，可选）与 CPU Rust 后端，兼容阿里云语音 API 和 OpenAI Audio API，并保留 Paraformer realtime WebSocket 能力。
+以 [Qwen3-ASR](https://github.com/QwenLM/Qwen3-ASR) 为核心的语音识别 API 服务，提供 CUDA vLLM（默认）、CUDA llama.cpp Q8（低显存，可选）与 CPU Rust 后端，兼容 OpenAI Audio API（离线转写 + Realtime 流式）。
 
 [English](./README_en.md)
 
@@ -17,13 +17,12 @@
 
 ## 主要特性
 
-- **混合运行时栈** - 离线推理与 `/v1/realtime` 由 Qwen3-ASR（R2T2，vLLM / llama.cpp Q8）提供，阿里云 WebSocket 流式由 Paraformer realtime 能力提供
+- **混合运行时栈** - 离线推理与 `/v1/realtime` 统一由 Qwen3-ASR（R2T2，vLLM / llama.cpp Q8）提供
 - **多语言识别** - Qwen3-ASR 支持 52 种语言与方言，中英日韩等自动检测
 - **说话人分离** - 基于 Nemotron-3-Diarization（帧级 10ms、支持重叠、最多 8 人）自动识别多说话人，返回说话人标记
 - **实时说话人标签** - `/v1/realtime` 与 ASR 并行跑 Nemotron 流式分离，每段 `completed` 事件附带 `speaker`（约 1s 延迟）
 - **声纹注册与说话人命名** - 为说话人注册声纹样本后，转写结果的 `speaker_id` 自动替换为显示名
 - **OpenAI API 兼容** - 支持 `/v1/audio/transcriptions` 端点，可直接使用 OpenAI SDK
-- **阿里云 API 兼容** - 支持阿里云语音识别 RESTful API 和 WebSocket 流式协议
 - **WebSocket 实时流式** - 边说边出字的实时语音识别，支持增量 partial 结果
 - **GPU 显存控制** - 可调 vLLM 显存利用率（`QWEN_GPU_MEMORY_UTILIZATION`）
 - **两级空闲释放** - 空闲 15s 让引擎 `sleep`（权重回 CPU，唤醒仅 0.1~0.4s），持续空闲 10 分钟彻底释放 CUDA context
@@ -229,33 +228,30 @@ python start.py
 在 `.env` 中配置 `API_KEY` 后，所有接口都要求认证。不同接口组接受的
 请求头不同：
 
-| 接口组 | `X-NLS-Token` | `Authorization: Bearer` |
-|--------|:---:|:---:|
-| `/api/v1/voiceprint-*`（声纹管理） | ✅ | ✅ |
-| `/stream/*`（阿里云兼容 REST） | ✅ | ✅ |
-| `/v1/*`（OpenAI 兼容） | ✅ | ✅ |
-| `/ws/v1/asr/*`（WebSocket） | 请求头或查询参数 `token` / `x_nls_token` | ❌ |
+| 接口组 | 鉴权方式 |
+|--------|---------|
+| `/v1/*`、`/api/v1/voiceprint-*`（HTTP） | `Authorization: Bearer <API_KEY>`（兼容 `X-NLS-Token`） |
+| `/v1/realtime`（WebSocket） | 请求头 / `?token=` / 子协议 `openai-insecure-api-key.*` |
 
 说明：
-- 所有 HTTP 接口组同时接受 `X-NLS-Token` 与 `Authorization: Bearer`
-  （`X-NLS-Token` 优先）
+- HTTP 接口以 `Authorization: Bearer` 为主，`X-NLS-Token` 仅作兼容保留
 - WebSocket 浏览器端无法发送自定义请求头，因此支持查询参数传 token
 - `/docs`（Swagger）、`/redoc` 和 `/`（根路径信息）为公开页面，无需认证
 - `API_KEY` 未配置时，所有接口跳过认证
 
-### HTTP 转写接口对比
+### HTTP 转写接口
 
-两个离线转写端点都是**同步**接口（提交完整音频后等待一次返回完整结果），
-均走默认离线模型（`qwen3-asr-confucius4-r2t2`），支持说话人分离、声纹命名与词级时间戳。真正的流式是
-WebSocket 端点（见下文）：
+离线转写是**同步**接口（提交完整音频后等待一次返回完整结果），走当前激活的离线模型
+（`qwen3-asr-confucius4-r2t2`），支持说话人分离、声纹命名与词级时间戳；
+真正的流式是 WebSocket 端点（见下文）：
 
-| 维度 | `/stream/v1/asr`（阿里云兼容） | `/v1/audio/transcriptions`（OpenAI 兼容） |
-|------|------------------------------|------------------------------------------|
-| 输入方式 | 请求体原始音频（octet-stream）或 `audio_address` URL；不支持 multipart 上传 | `file` 文件上传 或 `audio_address` URL |
-| 热词 | ✅ `vocabulary_id` | ✅ `prompt`（与预设热词合并） |
-| 语言指定 | 自动检测 | ✅ `language` 参数 |
-| 响应格式 | 固定阿里云 JSON（`task_id`/`status`/`result`/`processing_time`） | `json` / `text` / `srt` / `vtt` / `verbose_json` |
-| 适合场景 | 阿里云 NLS 老客户端迁移（热词、协议一致） | OpenAI 生态（OpenAI SDK、字幕输出） |
+| 维度 | `/v1/audio/transcriptions`（OpenAI 兼容） |
+|------|------------------------------------------|
+| 输入方式 | `file` 文件上传 或 `audio_address` URL |
+| 热词 | ✅ `prompt`（与预设热词合并） |
+| 语言指定 | ✅ `language` 参数 |
+| 响应格式 | `json` / `text` / `srt` / `vtt` / `verbose_json` |
+| 适合场景 | OpenAI 生态（OpenAI SDK、字幕输出） |
 
 ### OpenAI 兼容接口
 
@@ -316,83 +312,15 @@ curl -X POST "http://localhost:9101/v1/audio/transcriptions" \
 > 每个端点的完整参数、响应字段与可复制的 curl / Python / WebSocket 示例见
 > [docs/api-usage.md](docs/api-usage.md)。
 
-### 阿里云兼容接口
-
-| 端点                      | 方法      | 功能                   |
-| ------------------------- | --------- | ---------------------- |
-| `/stream/v1/asr`        | POST      | 语音识别（支持长音频） |
-| `/stream/v1/asr/models` | GET       | 声明条目列表               |
-| `/stream/v1/asr/health` | GET       | 健康检查               |
-| `/ws/v1/asr`            | WebSocket | 流式语音识别（阿里云协议兼容） |
-| `/ws/v1/asr/funasr`     | WebSocket | FunASR 流式识别（向后兼容）   |
-| `/ws/v1/asr/qwen`       | WebSocket | **已废弃**（返回 `endpoint_deprecated`）|
-| `/v1/realtime`          | WebSocket | 标准 OpenAI Realtime 转录（`intent=transcription`）|
-
-**请求参数:**
-
-| 参数                           | 类型   | 默认值             | 说明                                  |
-| ------------------------------ | ------ | ------------------ | ------------------------------------- |
-| `audio_address`              | string | `https://media.cdn.vect.one/podcast_demo.mp4`（文档示例） | 音频/视频 URL（可选；若同时上传内容则忽略） |
-| `sample_rate`                | int    | `16000`          | 采样率                                |
-| `enable_speaker_diarization` | bool   | `true`           | 启用说话人分离                        |
-| `word_timestamps`            | bool   | `false`          | 返回后端支持的字词级时间戳；默认走 forced aligner（`ALIGNMENT_MODE=forced`），设为 `uniform` 时按字均分时长兜底 |
-| `vocabulary_id`              | string | -                  | 无权重热词上下文（英文逗号分隔，如：`词1,词2,Bank of China`），与 `ASR_DEFAULT_HOTWORDS` 预设热词合并生效；未传时用预设热词兜底。**Deprecated：** 数字权重不受支持，传入时会被忽略。 |
-
-**使用示例:**
-
-```bash
-# 基本用法
-curl -X POST "http://localhost:9101/stream/v1/asr" \
-  -H "Content-Type: application/octet-stream" \
-  --data-binary @audio.wav
-
-# 带参数
-curl -X POST "http://localhost:9101/stream/v1/asr?enable_speaker_diarization=true" \
-  -H "Content-Type: application/octet-stream" \
-  --data-binary @audio.wav
-```
-
-**响应示例:**
-
-```json
-{
-  "task_id": "xxx",
-  "status": 200,
-  "message": "SUCCESS",
-  "result": "说话人1的内容...\n说话人2的内容...",
-  "duration": 60.5,
-  "processing_time": 1.234,
-  "segments": [
-    {
-      "text": "今天天气不错。",
-      "start_time": 0.0,
-      "end_time": 2.5,
-      "speaker_id": "说话人1",
-      "word_tokens": [
-        {"text": "今天", "start_time": 0.0, "end_time": 0.5},
-        {"text": "天气", "start_time": 0.5, "end_time": 0.9},
-        {"text": "不错", "start_time": 0.9, "end_time": 1.3}
-      ]
-    }
-  ]
-}
-```
-
 ### WebSocket 流式接口
-
-提供两类 WebSocket 端点：
 
 | 端点 | 后端 | 说明 |
 |------|------|------|
-| `/v1/realtime` | Qwen3-ASR（R2T2，vLLM / llama.cpp Q8） | **推荐**：标准 OpenAI Realtime transcription 协议，多语言 |
-| `/ws/v1/asr` | FunASR realtime（Paraformer） | 阿里云协议兼容，中文流式 + 实时标点 |
-| `/ws/v1/asr/funasr` | FunASR realtime | 上述端点的向后兼容别名 |
-| `/ws/v1/asr/qwen` | — | **已废弃**：连接后返回 `endpoint_deprecated` 并关闭（close code 1008），请改用 `/v1/realtime` |
+| `/v1/realtime` | Qwen3-ASR（R2T2，vLLM / llama.cpp Q8） | 标准 OpenAI Realtime transcription 协议（`intent=transcription`），多语言 + 实时说话人标签 |
 
-这些端点都是**实时语音转录**——音频增量发送，说话的同时返回增量结果。
-这与离线 HTTP 接口有本质区别：
+实时语音转录——音频增量发送，说话的同时返回增量结果。与离线 HTTP 接口有本质区别：
 
-| | WebSocket（实时） | HTTP 离线（`/v1/*`、`/stream/v1/asr`） |
+| | WebSocket（实时） | HTTP 离线（`/v1/*`） |
 |---|---|---|
 | 交互方式 | 长连接，边传音频边收结果 | 一次性提交完整音频，同步等待 |
 | 结果 | 增量 partial → `segment_end` 确认 | 完整结果（分段 + 时间戳） |
@@ -406,7 +334,7 @@ curl -X POST "http://localhost:9101/stream/v1/asr?enable_speaker_diarization=tru
 需要声纹命名与分段结构时，会话结束后再把录音发离线接口。
 
 鉴权：浏览器端 WebSocket 无法发送自定义请求头，通过查询参数传 API key
-（`?token=YOUR_KEY` 或 `x_nls_token`）；未配置 `API_KEY` 时免鉴权。
+（`?token=YOUR_KEY`）；未配置 `API_KEY` 时免鉴权。
 
 **OpenAI Realtime 转录协议**（`/v1/realtime`）——标准 OpenAI Realtime
 WebSocket 子集（`intent=transcription`），识别复用 Qwen3-ASR 流式引擎。
@@ -472,14 +400,6 @@ async def main():
 asyncio.run(main())
 ```
 
-**FunASR 流式协议**（`/ws/v1/asr` 与 `/ws/v1/asr/funasr`）——阿里云 NLS
-风格：先发 JSON 帧（`{"header": {"message_id": "...", "task": "start"},
-"payload": {...}}`），随后发二进制音频，最后发 `task: "stop"`。服务器事件
-顺序：`TranscriptionStarted` → `SentenceBegin` → `TranscriptionResultChanged`
-（中间结果）→ `SentenceEnd` → `TranscriptionCompleted`。payload 支持
-`format`、`sample_rate`、`enable_intermediate_result`、`enable_punctuation`、
-`enable_itn` 等参数。
-
 **实时行为**（Qwen3 路径）：真正的实时识别。每个音频 chunk（默认 160ms）
 增量解码后立即推送 `conversation.item.input_audio_transcription.delta`，
 客户端拼接 delta 即得实时字幕；FireRedVAD 检测到句尾静音（或单段达到
@@ -512,13 +432,10 @@ asyncio.run(main())
 > 增量拼接），`.completed` 的 `transcript` 才做 ITN 与标点规范化。
 
 **流式限制**：
-- 两条路径都不返回词级时间戳
-- FunASR 路径最多保留约 10 秒待处理音频，队列满时对发送端施加背压而非
-  丢弃音频
-- **两条路径都不支持说话人分离与声纹命名**——声纹匹配需要完整的单人
-  片段，因此只运行在离线接口。变通方案：先用 WebSocket 实时出字幕，结束
-  后把完整录音再发一次 `/v1/audio/transcriptions`（或 `/stream/v1/asr`），
-  获得带说话人分离与声纹名的分段结果（双请求模式）
+- 不返回词级时间戳
+- 实时链路返回整段 `speaker` 标签，但没有离线接口那样的分段结构与声纹命名。
+  需要声纹名与分段结构时，会话结束后把完整录音再发一次
+  `/v1/audio/transcriptions`（双请求模式）
 
 ## 说话人分离
 
@@ -534,12 +451,10 @@ asyncio.run(main())
 关闭说话人分离：
 
 ```bash
-# OpenAI API
 -F "enable_speaker_diarization=false"
-
-# 阿里云 API
-?enable_speaker_diarization=false
 ```
+
+> 注意：说话人检测始终运行（作为分段依据），该开关只控制是否输出 `speaker` 标签。
 
 ## 音频处理
 
@@ -547,21 +462,14 @@ asyncio.run(main())
 
 长音频自动分段处理：
 
-1. **VAD 语音检测** - 检测语音边界，过滤静音
-2. **贪婪合并** - 短片段与相邻段合并，同段不超过 `MAX_SEGMENT_SEC`（默认60秒）
-3. **有界切分不丢尾音** - 超长段按低能量点或固定时长切分，末尾残段并入前段（不会因不足最小时长被丢弃）
-4. **句末标点补齐** - R2T2 在段尾被截断时通常不给标点，离线结果会用 FunASR 标点模型补一个句末标点（`ASR_RESTORE_SENTENCE_ENDING=true`，只补标点、不改写正文）
-5. **批处理推理** - 多片段并行处理，GPU 模式下性能提升 2-3 倍
+1. **Nemotron 语音检测** - 帧级（10ms）检测说话人活动，作为切分依据（说话人检测始终运行）
+2. **有界合并** - 以活动区间边界为切点、覆盖完整时间轴；仅短片段（<1s）与相邻段合并，同段不超过 `MAX_SEGMENT_SEC`（默认60秒）
+3. **有界切分不丢尾音** - 超长段按固定时长切分，末尾残段并入前段（不会因不足最小时长被丢弃）
+4. **长静音断句** - 段间静音超过 `MAX_SILENCE_GAP_SEC`（默认 5s）或语音覆盖率低于 50%（时长 >15s）时切段，避免整段被静音拖成空输出
+5. **句末标点补齐** - R2T2 在段尾被截断时通常不给标点，离线结果会用 FunASR 标点模型补一个句末标点（`ASR_RESTORE_SENTENCE_ENDING=true`，只补标点、不改写正文）
+6. **批处理推理** - 多片段并行处理，GPU 模式下性能提升 2-3 倍
 
 ### WebSocket 流式识别限制
-
-**FunASR 模型限制**（使用 `/ws/v1/asr` 或 `/ws/v1/asr/funasr`）：
-- ✅ 实时语音识别、低延迟
-- ✅ 字句级时间戳
-- ❌ **词级时间戳**（FunASR realtime 路径未实现）
-- ❌ **置信度分数**（未实现）
-- 音频入口固定保留最多 10 秒待处理数据；队列满时会对 WebSocket 发送端施加背压，不会静默丢弃音频。客户端应持续读取识别事件并增量发送。
-- 该路径使用 Paraformer，离线接口使用 Qwen3-ASR；应在同一路径内比较延迟，不能直接比较两者总吞吐。
 
 **Qwen3-ASR 流式**（使用 `/v1/realtime`，标准 OpenAI Realtime 协议）：
 - ✅ 支持多语言实时识别
@@ -588,18 +496,11 @@ asyncio.run(main())
 > 权重并用 `QWEN3_ASR_MODEL` 切换后才会出现在列表里；转写请求的 `model` 字段不参与选模型
 > （见 [docs/api-usage.md](docs/api-usage.md#9-模型-id-与别名)）。
 
-## 仅实时能力
-
-| 能力 ID | 运行时 | 说明 |
-| ------- | ------ | ---- |
-| `paraformer-large` | FunASR realtime | 中文 WebSocket 实时识别栈，包含实时标点链路 |
-
 **运行时选择:**
 - **默认**：`qwen3-asr-confucius4-r2t2`（24GB 卡实测：休眠态约 2.8GB、唤醒态 ASR 引擎约 8.8GB；Q8 后端约 4.1GB，见下文「实测显存」）
 - **显存紧张 / 纯 CPU / macOS**: 选择基于 vendored Rust 的 `qwen3-asr-0.6b`
 - **环境变量覆盖**: 设置 `QWEN3_ASR_MODEL=qwen3-asr-confucius4-r2t2`、`qwen3-asr-1.7b` 或 `qwen3-asr-0.6b` 可跳过自动选择
 - 模型本地路径可用 `QWEN3_ASR_MODEL_PATH` / `QWEN3_FORCED_ALIGNER_PATH` 覆盖（`models.json` 支持 `${VAR:-default}` 占位符）
-- `paraformer-large` 实时能力始终为 WebSocket 流式准备
 
 启动时会先检测当前运行计划所需模型；如果本地缓存缺失，会自动下载。离线部署可显式设置 `HF_HUB_OFFLINE=1` 并提前准备模型缓存。
 
@@ -611,16 +512,13 @@ asyncio.run(main())
 |------|------|-----------|------|
 | Confucius4-R2T2 | ~3.9GB | 本地：`/data1/models/Confucius4-R2T2` | **默认**离线转写、`/v1/realtime` 流式（多语言） |
 | Qwen3-ForcedAligner 0.6B | ~1.8GB | 本地：`/data1/models/Qwen3-ForcedAligner-0.6B` | 词级时间戳（离线 `word_timestamps=true`，懒加载） |
-| Paraformer Large | ~849MB | MS：`/data1/models/modelscope/hub/models/iic/speech_paraformer-large_...` | `/ws/v1/asr` + `/ws/v1/asr/funasr`（中文实时流式） |
-| 标点（离线） | ~300MB | MS：`/data1/models/modelscope/hub/models/iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch` | 离线/流式标点 |
-| 标点（实时） | ~300MB | MS：`/data1/models/modelscope/hub/models/iic/punc_ct-transformer_..._vad_realtime-...` | FunASR 流式路径实时标点 |
+| 标点（离线） | ~300MB | MS：`/data1/models/modelscope/hub/models/iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch` | 离线句末标点补齐（`ASR_RESTORE_SENTENCE_ENDING`） |
 | Nemotron-3-Diarization | ~397MB | 本地：`/data1/models/Nemotron-3-Diarization` | 说话人分离（离线，帧级/重叠/8 人） |
 | CAM++ 声纹验证 | ~90MB | MS：`/data1/models/modelscope/hub/models/damo/speech_campplus_sv_zh-cn_16k-common` | 声纹注册与命名匹配 |
-| VAD（FSMN） | ~69MB | MS：`/data1/models/modelscope/hub/models/damo/speech_fsmn_vad_zh-cn-16k-common-pytorch` | 语音活动检测、音频切分 |
 
 **使用场景指引**：
 
-- **中文实时流式**（低延迟 + 实时标点）：FunASR 路径使用 Paraformer Large + 实时标点模型（ModelScope 渠道）
+- **实时流式**（低延迟 + 实时说话人标签）：`/v1/realtime` 用 Confucius4-R2T2
 - **多语言 / 离线 / 词级时间戳**：Confucius4-R2T2 + ForcedAligner
 - **说话人分离**（仅离线接口）：Nemotron-3-Diarization（本地模型，需 transformers ≥5 的 `Nemotron3DiarizationForAudioFrameClassification`）
 - **声纹命名**（仅离线接口）：CAM++（ModelScope 渠道）
@@ -631,15 +529,11 @@ asyncio.run(main())
 | 接口 | 模型 |
 |------|------|
 | `POST /v1/audio/transcriptions` | qwen3-asr-confucius4-r2t2 |
-| `POST /stream/v1/asr` | qwen3-asr-confucius4-r2t2 |
-| `GET /v1/models`、`health`、`/stream/v1/asr/models` | 只读查询，不跑推理 |
+| `GET /v1/models` | 只读查询，不跑推理 |
 | `/v1/realtime` | qwen3-asr-confucius4-r2t2 |
-| `/ws/v1/asr`、`/ws/v1/asr/funasr` | paraformer-large（中文实时） |
-| `/ws/v1/asr/qwen` | 已废弃，返回 `endpoint_deprecated` |
 
-所有 HTTP 转写接口共用默认离线模型（`qwen3-asr-confucius4-r2t2`，可用
-`QWEN3_ASR_MODEL=qwen3-asr-0.6b` 覆盖）；Paraformer 只服务于两个
-FunASR 兼容的 WebSocket 端点。
+所有接口共用当前激活的离线模型（`qwen3-asr-confucius4-r2t2`，可用
+`QWEN3_ASR_MODEL` 切换）。
 
 ## 声纹数据库
 

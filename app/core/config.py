@@ -59,11 +59,7 @@ class Settings:
         "local_files_only": True,  # 强制使用本地模型，禁止联网下载
     }
     ASR_MODELS_CONFIG: str = str(BASE_DIR / "app/services/asr/models.json")
-    VAD_MODEL: str = "damo/speech_fsmn_vad_zh-cn-16k-common-pytorch"
     PUNC_MODEL: str = "iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch"
-    PUNC_REALTIME_MODEL: str = (
-        "iic/punc_ct-transformer_zh-cn-common-vad_realtime-vocab272727"
-    )
 
     # 流式ASR远场过滤配置
     ASR_ENABLE_NEARFIELD_FILTER: bool = True  # 是否启用远场声音过滤
@@ -93,10 +89,11 @@ class Settings:
 
     # 音频分段配置
     MAX_SEGMENT_SEC: float = 60.0  # Max offline ASR segment duration in seconds.
+    # 段间静音超过该值时断开（避免「少量语音 + 大量静音」整段被模型判空）
+    MAX_SILENCE_GAP_SEC: float = 5.0
 
     # Runtime 并发配置（按 backend 独立控制）
     QWEN_RUST_CPU_WORKERS: int = 4
-    FUNASR_WORKERS: int = 1
 
     # 空闲自动归还显存配置（秒；超过该时长无请求则 sleep/卸载 vLLM 引擎释放显存，0=禁用）
     QWEN_IDLE_UNLOAD_TIMEOUT: int = 300
@@ -273,14 +270,13 @@ class Settings:
         self.MAX_SEGMENT_SEC = float(
             os.getenv("MAX_SEGMENT_SEC", str(self.MAX_SEGMENT_SEC))
         )
+        self.MAX_SILENCE_GAP_SEC = float(
+            os.getenv("MAX_SILENCE_GAP_SEC", str(self.MAX_SILENCE_GAP_SEC))
+        )
 
         self.QWEN_RUST_CPU_WORKERS = int(
             os.getenv("QWEN_RUST_CPU_WORKERS", str(self.QWEN_RUST_CPU_WORKERS))
         )
-        self.FUNASR_WORKERS = int(
-            os.getenv("FUNASR_WORKERS", str(self.FUNASR_WORKERS))
-        )
-
         self.QWEN_IDLE_UNLOAD_TIMEOUT = int(
             os.getenv("QWEN_IDLE_UNLOAD_TIMEOUT", str(self.QWEN_IDLE_UNLOAD_TIMEOUT))
         )
